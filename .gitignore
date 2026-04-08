@@ -1,0 +1,11 @@
+# Build artifacts
+bin/
+/vergeos-cloud-controller-manager
+
+# IDE and tool config
+.claude/
+.mcp.json
+
+# OS files
+*.DS_Store
+Thumbs.db

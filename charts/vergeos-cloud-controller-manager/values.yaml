@@ -1,0 +1,38 @@
+image:
+  repository: ghcr.io/verge-io/vergeos-cloud-controller-manager
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# - name: ghcr-credentials
+
+vergeos:
+  host: ""
+  apiKey: ""
+  verifySSL: "true"
+  existingSecret: ""
+
+loadBalancer:
+  enabled: true
+  networkID: 0
+  ipPool: []
+
+replicaCount: 1
+
+nodeSelector:
+  node-role.kubernetes.io/control-plane: "true"
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    effect: NoSchedule
+  - key: node.cloudprovider.kubernetes.io/uninitialized
+    value: "true"
+    effect: NoSchedule
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

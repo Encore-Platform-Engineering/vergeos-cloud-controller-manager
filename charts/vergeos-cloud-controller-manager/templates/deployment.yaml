@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vergeos-cloud-controller-manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/local/bin/vergeos-cloud-controller-manager
+            - --cloud-provider=vergeos
+            - --cloud-config=/etc/kubernetes/vergeos-cloud-config.json
+            - --use-service-account-credentials=true
+            - --leader-elect=true
+            - --v=2
+          envFrom:
+            - secretRef:
+                name: {{ .Values.vergeos.existingSecret | default (printf "%s-credentials" .Release.Name) }}
+          volumeMounts:
+            - name: cloud-config
+              mountPath: /etc/kubernetes/vergeos-cloud-config.json
+              subPath: cloud-config.json
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: cloud-config
+          configMap:
+            name: {{ .Release.Name }}-config

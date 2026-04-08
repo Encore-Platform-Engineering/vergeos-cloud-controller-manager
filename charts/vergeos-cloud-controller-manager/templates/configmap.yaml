@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+data:
+  cloud-config.json: |
+    {
+      "loadBalancer": {
+        "enabled": {{ .Values.loadBalancer.enabled }},
+        "networkID": {{ .Values.loadBalancer.networkID }},
+        "ipPool": {{ .Values.loadBalancer.ipPool | toJson }}
+      }
+    }

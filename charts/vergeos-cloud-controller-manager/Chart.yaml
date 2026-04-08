@@ -1,0 +1,16 @@
+annotations:
+  catalog.cattle.io/display-name: VergeOS Cloud Controller Manager
+  catalog.cattle.io/kube-version: '>= 1.16.0-0'
+  catalog.cattle.io/os: linux
+  catalog.cattle.io/permits-os: linux, windows
+  catalog.cattle.io/rancher-version: '>= 2.10.0-0'
+apiVersion: v2
+appVersion: 0.1.0
+description: VergeOS Cloud Controller Manager for Kubernetes
+home: https://github.com/verge-io
+icon: file://icon.svg
+maintainers:
+- name: Verge.io
+name: vergeos-cloud-controller-manager
+type: application
+version: 0.1.0

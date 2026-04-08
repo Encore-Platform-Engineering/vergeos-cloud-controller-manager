@@ -1,0 +1,69 @@
+questions:
+  - variable: vergeos.host
+    label: VergeOS Host URL
+    description: "Full URL including scheme (e.g. https://vergeos.example.com)"
+    type: string
+    required: true
+    group: "VergeOS Connection"
+
+  - variable: vergeos.apiKey
+    label: API Key
+    description: "VergeOS API key for authentication"
+    type: password
+    required: true
+    group: "VergeOS Connection"
+
+  - variable: vergeos.verifySSL
+    label: Verify SSL
+    description: "Verify SSL certificates for VergeOS API"
+    type: enum
+    default: "false"
+    options:
+      - "true"
+      - "false"
+    group: "VergeOS Connection"
+
+  - variable: vergeos.existingSecret
+    label: Existing Secret
+    description: "Name of an existing Secret with VergeOS credentials (overrides above fields)"
+    type: string
+    group: "VergeOS Connection"
+
+  - variable: loadBalancer.enabled
+    label: Enable Load Balancer
+    description: "Enable LoadBalancer service support via VergeOS VNet rules"
+    type: boolean
+    default: true
+    group: "Load Balancer"
+    show_subquestion_if: true
+    subquestions:
+      - variable: loadBalancer.networkID
+        label: VNet Network ID
+        description: "VergeOS VNet network ID for load balancer rule creation"
+        type: int
+        required: true
+        default: 0
+      - variable: loadBalancer.ipPool
+        label: IP Pool
+        description: "Comma-separated list of IPs available for LoadBalancer allocation (e.g. 10.0.0.100,10.0.0.101)"
+        type: string
+
+  - variable: imagePullSecrets[0].name
+    label: Image Pull Secret
+    description: "Name of an existing docker-registry secret for pulling images from GHCR (leave empty if public)"
+    type: string
+    group: "Advanced"
+
+  - variable: image.tag
+    label: Image Tag
+    description: "Container image tag"
+    type: string
+    default: "0.1.0"
+    group: "Advanced"
+
+  - variable: replicaCount
+    label: Replica Count
+    description: "Number of CCM replicas (only one will be leader)"
+    type: int
+    default: 1
+    group: "Advanced"
