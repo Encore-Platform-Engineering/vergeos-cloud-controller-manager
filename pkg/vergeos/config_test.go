@@ -98,3 +98,35 @@ func TestParseConfig_NodeNetworkID(t *testing.T) {
 		t.Error("expected error for negative nodeNetworkID")
 	}
 }
+
+func TestParseConfig_IPPoolValidation(t *testing.T) {
+	cfgWith := func(pool string) string {
+		return `{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":` + pool + `}}`
+	}
+	for name, pool := range map[string]string{
+		"cidr":      `["10.0.0.0/24"]`,
+		"range":     `["10.0.0.1-10.0.0.9"]`,
+		"garbage":   `["not-an-ip"]`,
+		"quote":     `["10.0.0.1' or ip ne '"]`,
+		"empty":     `[""]`,
+		"space":     `[" 10.0.0.1"]`,
+		"ipv6":      `["fd00::1"]`,
+		"mapped":    `["::ffff:10.0.0.1"]`,
+		"duplicate": `["10.0.0.1","10.0.0.2","10.0.0.1"]`,
+		"leading0":  `["010.000.000.001","10.0.0.1"]`,
+	} {
+		if _, err := parseConfig(strings.NewReader(cfgWith(pool))); err == nil {
+			t.Errorf("%s: expected error for ipPool %s", name, pool)
+		}
+	}
+
+	cfg, err := parseConfig(strings.NewReader(cfgWith(`["10.0.0.1","10.0.0.2"]`)))
+	if err != nil || len(cfg.LoadBalancer.IPPool) != 2 {
+		t.Fatalf("valid pool rejected: %v", err)
+	}
+
+	// Disabled LB: pool is not inspected.
+	if _, err := parseConfig(strings.NewReader(`{"loadBalancer":{"enabled":false,"ipPool":["junk"]}}`)); err != nil {
+		t.Errorf("disabled LB must not validate pool: %v", err)
+	}
+}

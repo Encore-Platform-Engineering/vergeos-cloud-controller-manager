@@ -163,6 +163,8 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
 }
 ```
 
+`ipPool` entries must be single IPv4 addresses (no CIDRs or ranges); duplicates and malformed entries make the CCM fail at startup.
+
 ## How It Works
 
 ### Node Lifecycle
@@ -180,11 +182,15 @@ The CCM implements the Kubernetes `InstancesV2` interface:
 The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet rules (an `ipalias` on the vnet plus one `incoming`/`translate` rule per Service port).
 
 1. **EnsureLoadBalancer / UpdateLoadBalancer** — Converge: compute the desired rules (one per port: `<lb-ip>:<port>` → `<node-ips>:<nodePort>`), then create, update and delete the difference and call `ApplyRules` once. Added/removed ports and changed NodePorts or nodes all converge. Any failure is returned, so the service controller retries; the next call resumes from the partial state.
-2. **EnsureLoadBalancerDeleted** — Deletes the Service's rules, applies, then releases its ipalias. Failures are returned and retried.
+2. **EnsureLoadBalancerDeleted** — Deletes the Service's rules, applies, then releases its ipalias(es). Failures are returned and retried. Leftover aliases (e.g. from a failed Ensure) are found with a single list of the vnet's addresses filtered by the exact owner marker — the pool is never probed per IP.
 
 **Ownership.** Every rule and ipalias carries an exact marker in its `description`: `vergeos-ccm/v1 cluster=<c> namespace=<ns> name=<svc> uid=<uid>` (each value URL-escaped). Only objects whose description matches exactly are ever updated or deleted, so same-named Services in other namespaces, other clusters or recreated Services (new UID) never touch each other. Rule names are `k8s-<owner hash>-<tcp|udp>-<port>`.
 
 **Requested IP.** Set `spec.loadBalancerIP` or the annotation `loadbalancer.vergeos.io/ip: <ip>` (if both are set they must match). The IP must be in `ipPool` and not used by another rule or vnet address, otherwise Ensure fails. Without a request the Service keeps the IP it already has, else gets the first free pool IP. Pin the IP for anything whose address is baked into other config (e.g. k0smotron API endpoints) — a recreated Service then gets the same IP back.
+
+**Source ranges.** `spec.loadBalancerSourceRanges` (or the legacy annotation `service.beta.kubernetes.io/load-balancer-source-ranges`) is written to every rule's `source_ip` as sorted, comma-separated IPv4 CIDRs; changing or removing it updates the rules. An invalid or non-IPv4 entry makes Ensure/Update fail with an error (the LB is never silently opened to everyone); `0.0.0.0/0` means unrestricted. [INFERENCE: not verified on a live VergeOS that a `translate` rule with `source_ip` drops non-matching sources rather than letting them reach the router's own firewall.]
+
+**`externalTrafficPolicy: Local` is rejected.** VergeOS translate rules have no health check, so traffic goes to every node's NodePort and `Local` would blackhole connections on nodes without a local endpoint. Ensure/Update fail with a clear error (visible as a Service event); use `Cluster` (the default). `healthCheckNodePort` is ignored.
 
 **Migrating from the old prefix scheme** (`k8s-<ns>-<svc>-<proto>-<port>`, empty description). Old names are ambiguous (`a-b/c` and `a/b-c` produce the same names), so a name match proves nothing. A legacy rule is adopted (renamed and stamped in place, no traffic interruption) only if **all** hold: empty description; name equals the legacy name of one of the Service's current ports; destination IP is in the Service's `status.loadBalancer.ingress`; destination port equals that port's `port` and target port equals its `nodePort`. The legacy ipalias is stamped only if an adopted rule points at the same IP. Anything else (e.g. rules for ports since removed) is never modified or deleted and must be cleaned up by hand.
 
@@ -193,7 +199,7 @@ The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet ru
 - Changing `--cluster-name` changes the ownership marker: existing LBs look foreign, their IPs count as in use, and the Services get new LBs. Clean up the old rules/aliases by hand.
 - ApplyRules is also issued when the vnet reports `need_fw_apply`, which recovers from a crash between writing rules and applying them (this also applies any other pending firewall change on that vnet).
 
-Not supported: `allocateLoadBalancerNodePorts: false`, SCTP, per-Service vnet/pool. Services with `spec.loadBalancerClass` are skipped by the cloud-provider service controller.
+Not supported: `allocateLoadBalancerNodePorts: false`, SCTP, IPv6 source ranges, `externalTrafficPolicy: Local`, per-Service vnet/pool (tracked in #7). Services with `spec.loadBalancerClass` are skipped by the cloud-provider service controller.
 
 **Same-vnet reachability** (clients on the same vnet as the ipalias, e.g. hosted-CP workers) is not yet verified; the rules use `direction=incoming`, `action=translate`, `interface=auto`.
 

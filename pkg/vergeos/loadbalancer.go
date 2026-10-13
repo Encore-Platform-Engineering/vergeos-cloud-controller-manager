@@ -234,31 +234,42 @@ const (
 	ipBusy                       // used by something else
 )
 
-func (l *loadBalancer) checkIP(ctx context.Context, ip string, all, owned []vergeos.VNetRule, owner lbOwner, svc *v1.Service) (ipAvailability, error) {
+// addressesByIP lists every address on the vnet once, grouped by IP, so IP
+// selection costs one API call instead of two per candidate.
+func (l *loadBalancer) addressesByIP(ctx context.Context) (map[string][]vergeos.VNetAddress, error) {
+	byIP := map[string][]vergeos.VNetAddress{}
+	if l.addrs == nil {
+		return byIP, nil
+	}
+	list, err := l.addrs.ListByNetwork(ctx, l.config.NetworkID)
+	if err != nil {
+		return nil, fmt.Errorf("listing VNet addresses: %w", err)
+	}
+	for _, a := range list {
+		byIP[a.IP] = append(byIP[a.IP], a)
+	}
+	return byIP, nil
+}
+
+func (l *loadBalancer) checkIP(ip string, byIP map[string][]vergeos.VNetAddress, all, owned []vergeos.VNetRule, owner lbOwner, svc *v1.Service) ipAvailability {
 	ownedKeys := map[vergeos.FlexInt]bool{}
 	for _, r := range owned {
 		ownedKeys[r.Key] = true
 	}
 	for _, r := range all {
 		if r.DestinationIP == ip && !ownedKeys[r.Key] {
-			return ipBusy, nil
+			return ipBusy
 		}
 	}
 	ownedIPs := ipsOf(owned)
-	if l.addrs == nil {
-		return ipFree, nil
+	avail := ipFree
+	for i := range byIP[ip] {
+		if classifyAddr(&byIP[ip][i], owner, ip, svc, ownedIPs) == addrForeign {
+			return ipBusy
+		}
+		avail = ipOurs
 	}
-	addr, err := l.addrs.GetByIP(ctx, l.config.NetworkID, ip)
-	if vergeos.IsNotFoundError(err) {
-		return ipFree, nil
-	}
-	if err != nil {
-		return ipBusy, fmt.Errorf("checking VNet address for %s: %w", ip, err)
-	}
-	if addr != nil && classifyAddr(addr, owner, ip, svc, ownedIPs) != addrForeign {
-		return ipOurs, nil
-	}
-	return ipBusy, nil
+	return avail
 }
 
 // chooseIP picks the LB IP for svc, in order:
@@ -271,22 +282,21 @@ func (l *loadBalancer) chooseIP(ctx context.Context, svc *v1.Service, owner lbOw
 	if err != nil {
 		return "", err
 	}
+	if req == "" && len(owned) > 0 && owned[0].DestinationIP != "" {
+		return owned[0].DestinationIP, nil
+	}
+	if req != "" && !l.inPool(req) {
+		return "", fmt.Errorf("requested load balancer IP %s is not in the configured ipPool", req)
+	}
+	byIP, err := l.addressesByIP(ctx)
+	if err != nil {
+		return "", err
+	}
 	if req != "" {
-		if !l.inPool(req) {
-			return "", fmt.Errorf("requested load balancer IP %s is not in the configured ipPool", req)
-		}
-		avail, err := l.checkIP(ctx, req, all, owned, owner, svc)
-		if err != nil {
-			return "", err
-		}
-		if avail == ipBusy {
+		if l.checkIP(req, byIP, all, owned, owner, svc) == ipBusy {
 			return "", fmt.Errorf("requested load balancer IP %s is already in use", req)
 		}
 		return req, nil
-	}
-
-	if len(owned) > 0 && owned[0].DestinationIP != "" {
-		return owned[0].DestinationIP, nil
 	}
 
 	candidates := append([]string{}, statusIPs(svc)...)
@@ -296,11 +306,7 @@ func (l *loadBalancer) chooseIP(ctx context.Context, svc *v1.Service, owner lbOw
 		if !l.inPool(ip) {
 			continue
 		}
-		avail, err := l.checkIP(ctx, ip, all, owned, owner, svc)
-		if err != nil {
-			return "", err
-		}
-		switch avail {
+		switch l.checkIP(ip, byIP, all, owned, owner, svc) {
 		case ipOurs:
 			return ip, nil
 		case ipFree:
@@ -384,15 +390,78 @@ func protocolToVNetProtocol(p v1.Protocol) string {
 // strPtr returns a pointer to a string.
 func strPtr(s string) *string { return &s }
 
+func sourceIPPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// annotationSourceRanges is the legacy equivalent of
+// spec.loadBalancerSourceRanges (comma-separated CIDRs).
+const annotationSourceRanges = "service.beta.kubernetes.io/load-balancer-source-ranges"
+
+// validateService rejects Services this CCM cannot serve correctly, so they
+// fail loudly (Service event) instead of being half-served.
+func validateService(svc *v1.Service) error {
+	// VergeOS translate rules have no health check, so traffic is spread over
+	// every node's NodePort; with Local, nodes without a local endpoint would
+	// drop 1/N of connections (and the client IP is not preserved).
+	if svc.Spec.ExternalTrafficPolicy == v1.ServiceExternalTrafficPolicyLocal {
+		return fmt.Errorf("service %s/%s: externalTrafficPolicy=Local (healthCheckNodePort) is not supported by the VergeOS load balancer; use Cluster", svc.Namespace, svc.Name)
+	}
+	return nil
+}
+
+// sourceRanges returns the Service's allowed client CIDRs as the canonical,
+// sorted, comma-separated value for a rule's source_ip, or "" for
+// unrestricted. spec.loadBalancerSourceRanges wins over the annotation. Any
+// invalid or non-IPv4 entry is an error: the LB must never end up open to
+// everyone because a restriction could not be applied.
+func sourceRanges(svc *v1.Service) (string, error) {
+	raw := svc.Spec.LoadBalancerSourceRanges
+	if len(raw) == 0 {
+		if ann := svc.Annotations[annotationSourceRanges]; ann != "" {
+			raw = strings.Split(ann, ",")
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	allowAll := false
+	for _, s := range raw {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(s)
+		if err != nil || n.IP.To4() == nil || strings.Contains(s, ":") {
+			return "", fmt.Errorf("service %s/%s: invalid loadBalancerSourceRanges entry %q (want an IPv4 CIDR)", svc.Namespace, svc.Name, s)
+		}
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			allowAll = true // 0.0.0.0/0 allows everyone, same as no restriction
+		}
+		if c := n.String(); !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	if allowAll {
+		return "", nil
+	}
+	sort.Strings(out)
+	return strings.Join(out, ","), nil
+}
+
 // desiredRule is the rule a service port should have.
 type desiredRule struct {
 	name, description, protocol              string
 	destIP, destPorts, targetIP, targetPorts string
+	sourceIP                                 string // comma-separated CIDRs; "" = any source
 }
 
 func (d desiredRule) key() string { return d.protocol + "/" + d.destPorts }
 
-func buildDesired(owner lbOwner, svc *v1.Service, ip string, targets []string) ([]desiredRule, error) {
+func buildDesired(owner lbOwner, svc *v1.Service, ip string, targets []string, sourceIP string) ([]desiredRule, error) {
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no node addresses available for LoadBalancer %s/%s", svc.Namespace, svc.Name)
 	}
@@ -418,6 +487,7 @@ func buildDesired(owner lbOwner, svc *v1.Service, ip string, targets []string) (
 			destPorts:   strconv.Itoa(int(p.Port)),
 			targetIP:    targetIP,
 			targetPorts: strconv.Itoa(int(p.NodePort)),
+			sourceIP:    sourceIP,
 		})
 	}
 	return out, nil
@@ -427,7 +497,8 @@ func (d desiredRule) matches(r vergeos.VNetRule) bool {
 	return r.Name == d.name && r.Description == d.description && r.Enabled &&
 		r.Protocol == d.protocol && r.Direction == "incoming" && r.Action == "translate" &&
 		r.DestinationIP == d.destIP && r.DestinationPorts == d.destPorts &&
-		sameIPSet(r.TargetIP, d.targetIP) && r.TargetPorts == d.targetPorts
+		sameIPSet(r.TargetIP, d.targetIP) && r.TargetPorts == d.targetPorts &&
+		sameIPSet(r.SourceIP, d.sourceIP)
 }
 
 // applyRules activates rule changes. It also applies when an earlier apply
@@ -491,34 +562,28 @@ func (l *loadBalancer) ensureAddress(ctx context.Context, ip string, owner lbOwn
 	return nil
 }
 
-// deleteOwnedAddresses removes the ipalias for each ip, but only if we own it.
-func (l *loadBalancer) deleteOwnedAddresses(ctx context.Context, ips []string, owner lbOwner, svc *v1.Service, ownedIPs map[string]bool) error {
+// releaseAddresses deletes every ipalias of ours on the vnet except keepIP
+// (pass "" to keep none). It lists the vnet's addresses once and classifies
+// each; foreign aliases are never touched and no per-IP lookups are made.
+func (l *loadBalancer) releaseAddresses(ctx context.Context, owner lbOwner, svc *v1.Service, ownedIPs map[string]bool, keepIP string) error {
 	if l.addrs == nil {
 		return nil
 	}
+	list, err := l.addrs.ListByNetwork(ctx, l.config.NetworkID)
+	if err != nil {
+		return fmt.Errorf("listing VNet addresses: %w", err)
+	}
 	var errs []error
-	seen := map[string]bool{}
-	for _, ip := range ips {
-		if ip == "" || seen[ip] {
+	for i := range list {
+		a := &list[i]
+		if a.IP == keepIP || classifyAddr(a, owner, a.IP, svc, ownedIPs) == addrForeign {
 			continue
 		}
-		seen[ip] = true
-		addr, err := l.addrs.GetByIP(ctx, l.config.NetworkID, ip)
-		if vergeos.IsNotFoundError(err) {
+		if err := l.addrs.Delete(ctx, int(a.Key)); err != nil && !vergeos.IsNotFoundError(err) {
+			errs = append(errs, fmt.Errorf("deleting VNet address for %s: %w", a.IP, err))
 			continue
 		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("finding VNet address for %s: %w", ip, err))
-			continue
-		}
-		if addr == nil || classifyAddr(addr, owner, ip, svc, ownedIPs) == addrForeign {
-			continue
-		}
-		if err := l.addrs.Delete(ctx, int(addr.Key)); err != nil && !vergeos.IsNotFoundError(err) {
-			errs = append(errs, fmt.Errorf("deleting VNet address for %s: %w", ip, err))
-			continue
-		}
-		klog.Infof("Deleted VNet address entry for %s", ip)
+		klog.Infof("Deleted VNet address entry for %s", a.IP)
 	}
 	return errors.Join(errs...)
 }
@@ -593,6 +658,7 @@ func (l *loadBalancer) reconcileRules(ctx context.Context, all, owned []vergeos.
 			DestinationPorts: &d.destPorts,
 			TargetIP:         &d.targetIP,
 			TargetPorts:      &d.targetPorts,
+			SourceIP:         &d.sourceIP,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("updating VNet rule %q: %w", u.rule.Name, err))
 			continue
@@ -617,6 +683,7 @@ func (l *loadBalancer) reconcileRules(ctx context.Context, all, owned []vergeos.
 			DestinationPorts: &d.destPorts,
 			TargetIP:         &d.targetIP,
 			TargetPorts:      &d.targetPorts,
+			SourceIP:         sourceIPPtr(d.sourceIP),
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("creating VNet rule %q: %w", d.name, err))
 			continue
@@ -675,6 +742,9 @@ func (l *loadBalancer) UpdateLoadBalancer(ctx context.Context, clusterName strin
 
 // converge is the shared body of Ensure and Update. Caller holds l.mu.
 func (l *loadBalancer) converge(ctx context.Context, clusterName string, svc *v1.Service, nodes []*v1.Node) (string, error) {
+	if err := validateService(svc); err != nil {
+		return "", err
+	}
 	owner := newLBOwner(clusterName, svc)
 
 	all, owned, err := l.listRules(ctx, owner, svc)
@@ -685,7 +755,11 @@ func (l *loadBalancer) converge(ctx context.Context, clusterName string, svc *v1
 	if err != nil {
 		return "", err
 	}
-	desired, err := buildDesired(owner, svc, ip, sortedTargets(nodes))
+	sources, err := sourceRanges(svc)
+	if err != nil {
+		return "", err
+	}
+	desired, err := buildDesired(owner, svc, ip, sortedTargets(nodes), sources)
 	if err != nil {
 		return "", err
 	}
@@ -703,19 +777,21 @@ func (l *loadBalancer) converge(ctx context.Context, clusterName string, svc *v1
 	}
 
 	// The IP moved (e.g. loadBalancerIP changed): release the old ipalias.
-	var oldIPs []string
+	moved := false
 	for _, r := range owned {
 		if r.DestinationIP != ip {
-			oldIPs = append(oldIPs, r.DestinationIP)
+			moved = true
 		}
 	}
 	for _, s := range statusIPs(svc) {
 		if s != ip {
-			oldIPs = append(oldIPs, s)
+			moved = true
 		}
 	}
-	if err := l.deleteOwnedAddresses(ctx, oldIPs, owner, svc, ipsOf(owned)); err != nil {
-		return "", err
+	if moved {
+		if err := l.releaseAddresses(ctx, owner, svc, ipsOf(owned), ip); err != nil {
+			return "", err
+		}
 	}
 	klog.Infof("LoadBalancer %s/%s converged at %s", svc.Namespace, svc.Name, ip)
 	return ip, nil
@@ -733,17 +809,7 @@ func (l *loadBalancer) EnsureLoadBalancerDeleted(ctx context.Context, clusterNam
 
 	var errs []error
 	changed := false
-	ownedIPs := ipsOf(owned)
-	ips := statusIPs(service)
-	// An ipalias can be orphaned by a failed Ensure (alias is created before
-	// the rules), leaving no rule or status IP to find it by. Probe the whole
-	// pool; only aliases carrying our exact marker are removed.
-	ips = append(ips, l.config.IPPool...)
-	if req, err := requestedIP(service); err == nil && req != "" {
-		ips = append(ips, req)
-	}
 	for _, r := range owned {
-		ips = append(ips, r.DestinationIP)
 		if err := l.rules.Delete(ctx, int(r.Key)); err != nil && !vergeos.IsNotFoundError(err) {
 			errs = append(errs, fmt.Errorf("deleting VNet rule %q: %w", r.Name, err))
 			continue
@@ -758,5 +824,8 @@ func (l *loadBalancer) EnsureLoadBalancerDeleted(ctx context.Context, clusterNam
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	return l.deleteOwnedAddresses(ctx, ips, owner, service, ownedIPs)
+	// An ipalias can be orphaned by a failed Ensure (alias is created before
+	// the rules), leaving no rule or status IP to find it by. One list of the
+	// vnet's addresses finds every alias we own; nothing is probed per IP.
+	return l.releaseAddresses(ctx, owner, service, ipsOf(owned), "")
 }

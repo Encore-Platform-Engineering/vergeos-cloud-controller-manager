@@ -24,6 +24,7 @@ type fakeVNet struct {
 	nextKey int
 
 	applies, creates, updates, deletes int
+	addrLists, addrGets                int
 
 	failCreate func(name string) error
 	failDelete func(name string) error
@@ -63,6 +64,9 @@ func (r fakeRules) Create(ctx context.Context, req *vergeos.VNetRuleCreateReques
 		Enabled: *req.Enabled, Protocol: *req.Protocol, Direction: *req.Direction, Action: *req.Action,
 		DestinationIP: *req.DestinationIP, DestinationPorts: *req.DestinationPorts,
 		TargetIP: *req.TargetIP, TargetPorts: *req.TargetPorts,
+	}
+	if req.SourceIP != nil {
+		rule.SourceIP = *req.SourceIP
 	}
 	r.f.rules = append(r.f.rules, rule)
 	r.f.creates++
@@ -106,6 +110,9 @@ func (r fakeRules) Update(ctx context.Context, id int, req *vergeos.VNetRuleUpda
 		if req.TargetPorts != nil {
 			x.TargetPorts = *req.TargetPorts
 		}
+		if req.SourceIP != nil {
+			x.SourceIP = *req.SourceIP
+		}
 		r.f.updates++
 		cp := *x
 		return &cp, nil
@@ -131,9 +138,16 @@ func (r fakeRules) Delete(ctx context.Context, id int) error {
 	return &vergeos.NotFoundError{Resource: "vnet_rules", ID: id}
 }
 
+func (a fakeAddrs) ListByNetwork(ctx context.Context, vnetID int, opts ...vergeos.ListOption) ([]vergeos.VNetAddress, error) {
+	a.f.mu.Lock()
+	defer a.f.mu.Unlock()
+	a.f.addrLists++
+	return append([]vergeos.VNetAddress{}, a.f.addrs...), nil
+}
 func (a fakeAddrs) GetByIP(ctx context.Context, vnetID int, ip string) (*vergeos.VNetAddress, error) {
 	a.f.mu.Lock()
 	defer a.f.mu.Unlock()
+	a.f.addrGets++
 	for _, x := range a.f.addrs {
 		if x.IP == ip {
 			cp := x
@@ -1080,5 +1094,185 @@ func TestEnsure_AppliesWhenVNetNeedsFWApply(t *testing.T) {
 	mustEnsure(t, lb2, "c", svc, testNodes("10.0.1.1"))
 	if f.applies != applies+1 {
 		t.Errorf("need_fw_apply must trigger an apply, applies=%d", f.applies)
+	}
+}
+
+// --- loadBalancerSourceRanges (#12) ---
+
+func TestSourceRanges_EnforcedAsRuleSourceIP(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080), tcp(443, 30443)})
+	svc.Spec.LoadBalancerSourceRanges = []string{"192.168.0.0/16", " 10.1.2.3/8 ", "192.168.0.0/16"}
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+
+	// Canonical network form, sorted, deduplicated, on every rule.
+	for _, port := range []string{"80", "443"} {
+		if got := f.ruleFor(t, port, ip).SourceIP; got != "10.0.0.0/8,192.168.0.0/16" {
+			t.Errorf("port %s source_ip = %q", port, got)
+		}
+	}
+
+	// Unchanged ranges: no writes.
+	creates, updates, deletes, applies := f.creates, f.updates, f.deletes, f.applies
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if f.creates != creates || f.updates != updates || f.deletes != deletes || f.applies != applies {
+		t.Error("idempotent ensure wrote")
+	}
+
+	// Changed ranges are reconciled in place and applied.
+	svc.Spec.LoadBalancerSourceRanges = []string{"172.16.0.0/12"}
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if f.updates != updates+2 || f.applies != applies+1 {
+		t.Errorf("updates %d->%d applies %d->%d", updates, f.updates, applies, f.applies)
+	}
+	if got := f.ruleFor(t, "80", ip).SourceIP; got != "172.16.0.0/12" {
+		t.Errorf("source_ip = %q after change", got)
+	}
+
+	// Removing the restriction clears source_ip.
+	svc.Spec.LoadBalancerSourceRanges = nil
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	for _, port := range []string{"80", "443"} {
+		if got := f.ruleFor(t, port, ip).SourceIP; got != "" {
+			t.Errorf("port %s source_ip = %q after removal, want empty", port, got)
+		}
+	}
+}
+
+func TestSourceRanges_UpdateLoadBalancerRestrictsExistingOpenRule(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8"}
+	if err := lb.UpdateLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.ruleFor(t, "80", ip).SourceIP; got != "10.0.0.0/8" {
+		t.Errorf("source_ip = %q", got)
+	}
+}
+
+func TestSourceRanges_Annotation(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	svc.Annotations = map[string]string{annotationSourceRanges: "10.0.0.0/8, 192.168.1.0/24"}
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if got := f.ruleFor(t, "80", ip).SourceIP; got != "10.0.0.0/8,192.168.1.0/24" {
+		t.Errorf("source_ip = %q", got)
+	}
+}
+
+func TestSourceRanges_AllowAllIsUnrestricted(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8", "0.0.0.0/0"}
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if got := f.ruleFor(t, "80", ip).SourceIP; got != "" {
+		t.Errorf("source_ip = %q, want empty for 0.0.0.0/0", got)
+	}
+}
+
+func TestSourceRanges_InvalidFailsClosed(t *testing.T) {
+	for _, bad := range []string{"not-a-cidr", "10.0.0.1", "10.0.0.0/33", "fd00::/8", "10.0.0.0/8'"} {
+		lb, f := newTestLB("10.0.0.100")
+		svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+		svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8", bad}
+		if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil ||
+			!strings.Contains(err.Error(), "loadBalancerSourceRanges") {
+			t.Errorf("%q: expected source range error, got %v", bad, err)
+		}
+		if len(f.rules) != 0 || len(f.addrs) != 0 {
+			t.Errorf("%q: nothing may be created (rules=%d addrs=%d)", bad, len(f.rules), len(f.addrs))
+		}
+	}
+}
+
+func TestSourceRanges_InvalidUpdateKeepsExistingRules(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8"}
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	svc.Spec.LoadBalancerSourceRanges = []string{"garbage"}
+	if err := lb.UpdateLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Fatal("expected error")
+	}
+	if got := f.ruleFor(t, "80", ip).SourceIP; got != "10.0.0.0/8" {
+		t.Errorf("existing restriction lost: %q", got)
+	}
+}
+
+// --- externalTrafficPolicy=Local (#13) ---
+
+func TestEnsure_ExternalTrafficPolicyLocalRejected(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	svc.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyLocal
+	svc.Spec.HealthCheckNodePort = 31000
+	_, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1", "10.0.1.2"))
+	if err == nil || !strings.Contains(err.Error(), "externalTrafficPolicy=Local") {
+		t.Fatalf("expected externalTrafficPolicy error, got %v", err)
+	}
+	if err := lb.UpdateLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Error("UpdateLoadBalancer must reject Local too")
+	}
+	if len(f.rules) != 0 || len(f.addrs) != 0 {
+		t.Errorf("rejected Service must not create anything: rules=%d addrs=%d", len(f.rules), len(f.addrs))
+	}
+
+	// Cluster (and unset) still work; Local Services can still be deleted.
+	svc.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyCluster
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	svc.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyLocal
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", svc); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rules) != 0 || len(f.addrs) != 0 {
+		t.Errorf("delete left rules=%d addrs=%d", len(f.rules), len(f.addrs))
+	}
+}
+
+// --- pool probing (#17) ---
+
+func bigPool(n int) []string {
+	var pool []string
+	for i := 0; i < n; i++ {
+		pool = append(pool, fmt.Sprintf("10.9.%d.%d", i/250, i%250+1))
+	}
+	return pool
+}
+
+func TestDelete_DoesNotProbePool(t *testing.T) {
+	pool := bigPool(500)
+	lb, f := newTestLB(pool...)
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	other := testService("default", "other", []v1.ServicePort{tcp(80, 30081)})
+	mustEnsure(t, lb, "c", other, testNodes("10.0.1.1"))
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	// Orphan alias of ours at an IP no rule or status mentions.
+	owner := newLBOwner("c", svc)
+	f.addrs = append(f.addrs, vergeos.VNetAddress{Key: 900, IP: pool[300], Type: "ipalias", Description: owner.String()})
+
+	f.addrGets, f.addrLists = 0, 0
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", svc); err != nil {
+		t.Fatal(err)
+	}
+	if f.addrGets != 0 || f.addrLists != 1 {
+		t.Errorf("delete made %d GetByIP and %d list calls, want 0 and 1", f.addrGets, f.addrLists)
+	}
+	if f.hasAddr(ip) || f.hasAddr(pool[300]) {
+		t.Errorf("own aliases not released: %+v", f.addrs)
+	}
+	if !f.hasAddr(pool[0]) || len(f.addrs) != 1 {
+		t.Errorf("other service's alias must remain: %+v", f.addrs)
+	}
+}
+
+func TestEnsure_AllocationDoesNotProbePerIP(t *testing.T) {
+	lb, f := newTestLB(bigPool(500)...)
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	// One GetByIP for ensureAddress at the chosen IP; the pool scan uses a single list.
+	if f.addrGets > 1 || f.addrLists != 1 {
+		t.Errorf("allocation made %d GetByIP and %d list calls", f.addrGets, f.addrLists)
 	}
 }
