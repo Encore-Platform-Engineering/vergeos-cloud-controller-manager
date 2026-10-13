@@ -37,7 +37,7 @@ func newCloud(config io.Reader) (*cloud, error) {
 	c := &cloud{config: cfg}
 
 	if client != nil {
-		c.instances = newInstances(client.VMs, client.MachineStatus)
+		c.instances = newInstances(client.VMs, client.MachineStatus, client.VMNICs, cfg.NodeNetworkID)
 	} else {
 		c.instances = &instances{}
 	}

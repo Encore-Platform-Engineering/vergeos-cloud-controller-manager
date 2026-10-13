@@ -6,6 +6,7 @@ metadata:
 data:
   cloud-config.json: |
     {
+      "nodeNetworkID": {{ .Values.nodeNetworkID | default 0 }},
       "loadBalancer": {
         "enabled": {{ .Values.loadBalancer.enabled }},
         "networkID": {{ .Values.loadBalancer.networkID }},

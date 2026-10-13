@@ -85,3 +85,16 @@ func TestParseConfig_LBEnabledEmptyPool(t *testing.T) {
 		t.Error("expected error when LB enabled but ipPool empty")
 	}
 }
+
+func TestParseConfig_NodeNetworkID(t *testing.T) {
+	cfg, err := parseConfig(strings.NewReader(`{"nodeNetworkID": 7}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NodeNetworkID != 7 {
+		t.Errorf("expected 7, got %d", cfg.NodeNetworkID)
+	}
+	if _, err := parseConfig(strings.NewReader(`{"nodeNetworkID": -1}`)); err == nil {
+		t.Error("expected error for negative nodeNetworkID")
+	}
+}
