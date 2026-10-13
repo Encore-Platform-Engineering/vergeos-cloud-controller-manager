@@ -12,6 +12,9 @@ vergeos:
   verifySSL: "true"
   existingSecret: ""
 
+# Limit node InternalIPs (from NIC DHCP leases) to NICs on this vnet ID; 0 = any.
+nodeNetworkID: 0
+
 loadBalancer:
   enabled: true
   networkID: 0

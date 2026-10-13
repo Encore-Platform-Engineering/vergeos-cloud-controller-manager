@@ -17,6 +17,12 @@ type MachineStatusClient interface {
 	Get(ctx context.Context, machineKey int) (*vergeos.MachineStatus, error)
 }
 
+// VMNICClient abstracts the govergeos VMNICs API for testing.
+// List takes the VM's Machine ID (not its $key).
+type VMNICClient interface {
+	List(ctx context.Context, machineID int) ([]vergeos.VMNIC, error)
+}
+
 // VNetAddressClient abstracts the govergeos VNetAddresses API for testing.
 type VNetAddressClient interface {
 	GetByIP(ctx context.Context, vnetID int, ip string) (*vergeos.VNetAddress, error)

@@ -7,7 +7,10 @@ import (
 )
 
 type cloudConfig struct {
-	LoadBalancer lbConfig `json:"loadBalancer"`
+	// NodeNetworkID, when set, limits node InternalIPs taken from NIC DHCP leases
+	// to NICs attached to this VergeOS vnet.
+	NodeNetworkID int      `json:"nodeNetworkID"`
+	LoadBalancer  lbConfig `json:"loadBalancer"`
 }
 
 type lbConfig struct {
@@ -24,6 +27,10 @@ func parseConfig(r io.Reader) (*cloudConfig, error) {
 
 	if err := json.NewDecoder(r).Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parsing cloud config: %w", err)
+	}
+
+	if cfg.NodeNetworkID < 0 {
+		return nil, fmt.Errorf("nodeNetworkID must not be negative")
 	}
 
 	if cfg.LoadBalancer.Enabled {

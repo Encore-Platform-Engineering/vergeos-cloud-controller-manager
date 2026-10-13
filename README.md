@@ -120,6 +120,7 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `vergeos.apiKey` | `""` | API key authentication |
 | `vergeos.verifySSL` | `"true"` | TLS certificate verification (set to `"false"` for self-signed certs) |
 | `vergeos.existingSecret` | `""` | Use an existing Secret for credentials |
+| `nodeNetworkID` | `0` | Only use NIC DHCP leases on this vnet ID for node InternalIPs (0 = all NICs); guest-agent IPs are not filtered |
 | `loadBalancer.enabled` | `true` | Enable LoadBalancer support |
 | `loadBalancer.networkID` | `0` | VNet network ID |
 | `loadBalancer.ipPool` | `[]` | Available LB IP addresses |
@@ -153,6 +154,7 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
 
 ```json
 {
+  "nodeNetworkID": 0,
   "loadBalancer": {
     "enabled": true,
     "networkID": 1,
@@ -167,9 +169,11 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
 
 The CCM implements the Kubernetes `InstancesV2` interface:
 
-1. **InstanceMetadata** — Resolves a Kubernetes node to a VergeOS VM (by provider ID or name), then returns the provider ID (`vergeos://<vm-id>`), instance type (`<cpu>cpu-<ram>mb`), and internal IP addresses from VM NICs.
+1. **InstanceMetadata** — Resolves a Kubernetes node to a VergeOS VM, then returns the provider ID (`vergeos://<vm-uuid>`), instance type (`<cpu>cpu-<ram>mb`), and addresses: `InternalIP`s from qemu-guest-agent if present, otherwise from the VM's NIC DHCP leases (`machine_nics.ipaddress`, optionally limited to `nodeNetworkID`), plus a `Hostname` equal to the node name.
 2. **InstanceExists** — Checks whether the backing VM still exists.
 3. **InstanceShutdown** — Reports whether the VM is powered off.
+
+**Node → VM resolution:** `vergeos://<vm-uuid>` (also the legacy `vergeos://<int $key>`) if the node has a providerID. Otherwise `status.nodeInfo.systemUUID` against the VM UUID, then the node name. Snapshots are never matched; more than one match is an error. Cluster API sets `vergeos://<vm-uuid>`, so the CCM's providerID agrees with the Machine.
 
 ### Load Balancer
 
