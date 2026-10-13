@@ -87,6 +87,10 @@ spec:
             timeoutSeconds: 5
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           envFrom:
             - secretRef:
                 name: {{ .Values.vergeos.existingSecret | default (printf "%s-credentials" .Release.Name) }}
@@ -95,9 +99,39 @@ spec:
               mountPath: /etc/kubernetes/vergeos-cloud-config.json
               subPath: cloud-config.json
               readOnly: true
+            {{- if or .Values.vergeos.caBundle .Values.vergeos.caSecret }}
+            - name: vergeos-ca
+              mountPath: /etc/vergeos/ca.crt
+              subPath: ca.crt
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: cloud-config
           configMap:
             name: {{ .Release.Name }}-config
+        {{- if and .Values.vergeos.caBundle .Values.vergeos.caSecret }}
+        {{- fail "set only one of vergeos.caBundle and vergeos.caSecret" }}
+        {{- end }}
+        {{- if .Values.vergeos.caSecret }}
+        - name: vergeos-ca
+          secret:
+            secretName: {{ .Values.vergeos.caSecret }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- else if .Values.vergeos.caBundle }}
+        - name: vergeos-ca
+          configMap:
+            name: {{ .Release.Name }}-config
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

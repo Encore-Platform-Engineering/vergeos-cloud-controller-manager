@@ -12,8 +12,15 @@ metadata:
   name: {{ .Release.Name }}-config
   namespace: {{ .Release.Namespace }}
 data:
+  {{- if .Values.vergeos.caBundle }}
+  ca.crt: |
+    {{- .Values.vergeos.caBundle | nindent 4 }}
+  {{- end }}
   cloud-config.json: |
     {
+      {{- if or .Values.vergeos.caBundle .Values.vergeos.caSecret }}
+      "caFile": "/etc/vergeos/ca.crt",
+      {{- end }}
       "nodeNetworkID": {{ .Values.nodeNetworkID | default 0 }},
       "loadBalancer": {
         "enabled": {{ .Values.loadBalancer.enabled }},

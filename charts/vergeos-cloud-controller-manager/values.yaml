@@ -12,6 +12,16 @@ vergeos:
   apiKey: ""
   verifySSL: "true"
   existingSecret: ""
+  # Trust a private CA for the VergeOS API (use with verifySSL "true").
+  # caBundle: inline PEM; caSecret: existing Secret with key `ca.crt`. Set at most one.
+  # Mounted at /etc/vergeos/ca.crt and wired via caFile in the cloud-config.
+  caBundle: ""
+  caSecret: ""
+
+# Extra container env, volumes and mounts (standard k8s syntax).
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
 
 # Limit node InternalIPs (from NIC DHCP leases) to NICs on this vnet ID; 0 = any.
 nodeNetworkID: 0

@@ -118,9 +118,12 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `imagePullSecrets` | `[]` | Image pull secrets for private registries |
 | `vergeos.host` | `""` | VergeOS API host (e.g., `10.8.8.26`) |
 | `vergeos.apiKey` | `""` | API key authentication |
-| `vergeos.verifySSL` | `"true"` | TLS certificate verification (set to `"false"` for self-signed certs) |
+| `vergeos.verifySSL` | `"true"` | TLS certificate verification. `"false"` disables it (the CCM logs a warning) — prefer `caBundle`/`caSecret` |
+| `vergeos.caBundle` | `""` | Inline PEM CA to trust for the VergeOS API (private/self-signed CA) |
+| `vergeos.caSecret` | `""` | Existing Secret (key `ca.crt`) with the CA to trust; alternative to `caBundle` |
+| `extraEnv` / `extraVolumes` / `extraVolumeMounts` | `[]` | Extra container env, volumes and mounts |
 | `vergeos.existingSecret` | `""` | Use an existing Secret for credentials |
-| `nodeNetworkID` | `0` | Only use NIC DHCP leases on this vnet ID for node InternalIPs (0 = all NICs); guest-agent IPs are not filtered |
+| `nodeNetworkID` | `0` | Only use NIC DHCP leases on this vnet ID for node InternalIPs (0 = all NICs); guest-agent IPs are only used for NICs on that vnet (matched by MAC) |
 | `loadBalancer.enabled` | `false` | Enable LoadBalancer support; requires `networkID` > 0 and a non-empty `ipPool` (chart fails to render otherwise) |
 | `loadBalancer.networkID` | `0` | VNet network ID |
 | `loadBalancer.ipPool` | `[]` | Available LB IP addresses |
@@ -150,7 +153,10 @@ Credentials are provided via environment variables (injected from a Kubernetes S
 |----------|-------------|
 | `VERGEOS_HOST` | VergeOS API host (e.g., `10.8.8.26`) |
 | `VERGEOS_API_KEY` | API key for authentication |
-| `VERGEOS_VERIFY_SSL` | Verify TLS certificates (`true`/`false`, default: `true`). Set to `false` for self-signed certs. |
+| `VERGEOS_VERIFY_SSL` | Verify TLS certificates (`true`/`false`, default: `true`). `false` disables verification and logs a warning. |
+| `VERGEOS_CA_FILE` | PEM file with extra CA certificates to trust (same as `caFile` in the cloud config). |
+
+The CCM exits at startup with a clear error if `VERGEOS_HOST`, credentials, or the API itself are unreachable/invalid.
 
 You can reference an existing secret instead of letting the chart create one:
 
@@ -166,6 +172,7 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
 ```json
 {
   "nodeNetworkID": 0,
+  "caFile": "/etc/vergeos/ca.crt",
   "loadBalancer": {
     "enabled": true,
     "networkID": 1,
@@ -182,7 +189,7 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
 
 The CCM implements the Kubernetes `InstancesV2` interface:
 
-1. **InstanceMetadata** — Resolves a Kubernetes node to a VergeOS VM, then returns the provider ID (`vergeos://<vm-uuid>`), instance type (`<cpu>cpu-<ram>mb`), and addresses: `InternalIP`s from qemu-guest-agent if present, otherwise from the VM's NIC DHCP leases (`machine_nics.ipaddress`, optionally limited to `nodeNetworkID`), plus a `Hostname` equal to the node name.
+1. **InstanceMetadata** — Resolves a Kubernetes node to a VergeOS VM, then returns the provider ID (`vergeos://<vm-uuid>`), instance type (`<cpu>cpu-<ram>mb`), and addresses: `InternalIP`s from the VM's NIC DHCP leases (`machine_nics.ipaddress`, optionally limited to `nodeNetworkID`), falling back to qemu-guest-agent IPs of interfaces whose MAC matches a VM NIC on that vnet (docker/CNI/bridge/loopback/link-local are skipped), plus a `Hostname` equal to the node name. If no InternalIP is found it returns an error so the node stays uninitialized and is retried.
 2. **InstanceExists** — Checks whether the backing VM still exists.
 3. **InstanceShutdown** — Reports whether the VM is powered off.
 
