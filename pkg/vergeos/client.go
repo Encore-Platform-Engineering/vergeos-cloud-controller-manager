@@ -27,6 +27,7 @@ type VMNICClient interface {
 type VNetAddressClient interface {
 	GetByIP(ctx context.Context, vnetID int, ip string) (*vergeos.VNetAddress, error)
 	Create(ctx context.Context, req *vergeos.VNetAddressCreateRequest) (*vergeos.VNetAddress, error)
+	Update(ctx context.Context, id int, req *vergeos.VNetAddressUpdateRequest) (*vergeos.VNetAddress, error)
 	Delete(ctx context.Context, id int) error
 }
 
