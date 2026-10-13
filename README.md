@@ -173,11 +173,20 @@ The CCM implements the Kubernetes `InstancesV2` interface:
 
 ### Load Balancer
 
-The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet rules:
+The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet rules (an `ipalias` on the vnet plus one `incoming`/`translate` rule per Service port).
 
-1. **EnsureLoadBalancer** — Allocates an IP from the pool, then creates a VNet NAT rule per service port: `k8s-<namespace>-<service>-<protocol>-<port>`. Rules translate `<allocated-ip>:<port>` to `<node-ips>:<nodePort>`. Calls `ApplyRules` to activate.
-2. **UpdateLoadBalancer** — Updates the target IPs on existing rules when nodes change.
-3. **EnsureLoadBalancerDeleted** — Deletes all VNet rules for the service and applies the change.
+1. **EnsureLoadBalancer / UpdateLoadBalancer** — Converge: compute the desired rules (one per port: `<lb-ip>:<port>` → `<node-ips>:<nodePort>`), then create, update and delete the difference and call `ApplyRules` once. Added/removed ports and changed NodePorts or nodes all converge. Any failure is returned, so the service controller retries; the next call resumes from the partial state.
+2. **EnsureLoadBalancerDeleted** — Deletes the Service's rules, applies, then releases its ipalias. Failures are returned and retried.
+
+**Ownership.** Every rule and ipalias carries an exact marker in its `description`: `vergeos-ccm/v1 cluster=<c> namespace=<ns> name=<svc> uid=<uid>` (each value URL-escaped). Only objects whose description matches exactly are ever updated or deleted, so same-named Services in other namespaces, other clusters or recreated Services (new UID) never touch each other. Rule names are `k8s-<owner hash>-<tcp|udp>-<port>`.
+
+**Requested IP.** Set `spec.loadBalancerIP` or the annotation `loadbalancer.vergeos.io/ip: <ip>` (if both are set they must match). The IP must be in `ipPool` and not used by another rule or vnet address, otherwise Ensure fails. Without a request the Service keeps the IP it already has, else gets the first free pool IP. Pin the IP for anything whose address is baked into other config (e.g. k0smotron API endpoints) — a recreated Service then gets the same IP back.
+
+**Migrating from the old prefix scheme** (`k8s-<ns>-<svc>-<proto>-<port>`, empty description). A legacy rule is adopted (renamed and stamped in place, no traffic interruption) only if its name matches this exact namespace/service **and** its destination IP is already in the Service's `status.loadBalancer.ingress`. Legacy rules that cannot be proven this way are never modified or deleted; they must be removed by hand. Services without a status IP (or whose rules were created by a different Service with an ambiguous name) get a fresh LB on a free IP.
+
+Not supported: `allocateLoadBalancerNodePorts: false`, SCTP, per-Service vnet/pool. Services with `spec.loadBalancerClass` are skipped by the cloud-provider service controller.
+
+**Same-vnet reachability** (clients on the same vnet as the ipalias, e.g. hosted-CP workers) is not yet verified; the rules use `direction=incoming`, `action=translate`, `interface=auto`.
 
 ## Building
 
