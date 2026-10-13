@@ -126,10 +126,10 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `loadBalancer.ipPool` | `[]` | Available LB IP addresses |
 | `replicaCount` | `1` | Number of replicas |
 | `nodeSelector` | `{}` | No selector: runs on control-plane or worker-only clusters (e.g. k0smotron) |
-| `tolerations` | control-plane, master, `node.cloudprovider.kubernetes.io/uninitialized`, not-ready, unreachable (all `operator: Exists`) | Lets the CCM start on tainted/uninitialized/NotReady nodes |
+| `tolerations` | control-plane, master, `node.cloudprovider.kubernetes.io/uninitialized`, not-ready, unreachable (all `operator: Exists`); not-ready/unreachable are tolerated for NoSchedule and, for NoExecute, only `tolerationSeconds: 300` so a dead node's CCM is rescheduled | Lets the CCM start on tainted/uninitialized/NotReady nodes |
 | `affinity` | `{}` | Overrides the default preferred pod anti-affinity (used when `replicaCount` > 1) |
 | `hostNetwork` | `true` | Host networking so the CCM can initialize nodes before the CNI is ready (needs a free host port `securePort`; not allowed by the `baseline`/`restricted` Pod Security levels, so keep it in `kube-system` or set `false` if your CNI is already up) |
-| `dnsPolicy` | `ClusterFirstWithHostNet` | DNS policy for the pod |
+| `dnsPolicy` | `Default` | Pod DNS policy. `Default` uses the node's resolv.conf because CoreDNS isn't running until nodes are initialized (worker-only clusters); set `ClusterFirstWithHostNet` to resolve in-cluster names |
 | `securePort` | `10258` | Secure-serving port; `/healthz` is used for liveness/readiness probes |
 | `priorityClassName` | `system-cluster-critical` | Pod priority class |
 | `podSecurityContext` / `securityContext` | non-root `65532`, read-only rootfs, drop `ALL`, seccomp `RuntimeDefault` | Pod/container hardening |

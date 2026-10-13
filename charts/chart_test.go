@@ -34,6 +34,9 @@ type rendered struct {
 func helmTemplate(t *testing.T, args ...string) (*rendered, error) {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm not installed but CI is set")
+		}
 		t.Skip("helm not installed")
 	}
 	cmd := exec.Command("helm", append([]string{"template", "vergeos-ccm", chartDir, "--namespace", "kube-system"}, args...)...)
@@ -144,8 +147,8 @@ func TestSchedulingWorksOnWorkerOnlyAndTaintedClusters(t *testing.T) {
 	if len(spec.NodeSelector) != 0 {
 		t.Errorf("nodeSelector must be empty, got %v", spec.NodeSelector)
 	}
-	if !spec.HostNetwork || spec.DNSPolicy != corev1.DNSClusterFirstWithHostNet {
-		t.Errorf("want hostNetwork + ClusterFirstWithHostNet, got %v / %v", spec.HostNetwork, spec.DNSPolicy)
+	if !spec.HostNetwork || spec.DNSPolicy != corev1.DNSDefault {
+		t.Errorf("want hostNetwork + dnsPolicy Default, got %v / %v", spec.HostNetwork, spec.DNSPolicy)
 	}
 	for _, key := range []string{
 		"node-role.kubernetes.io/control-plane",
@@ -164,10 +167,24 @@ func TestSchedulingWorksOnWorkerOnlyAndTaintedClusters(t *testing.T) {
 			t.Errorf("missing operator Exists toleration for %s", key)
 		}
 	}
-	// Tolerations for control-plane/master/not-ready/unreachable must cover NoExecute too (no effect set).
-	for _, tol := range spec.Tolerations {
-		if tol.Key != "node.cloudprovider.kubernetes.io/uninitialized" && tol.Effect != "" {
-			t.Errorf("toleration %s should match all effects, has %s", tol.Key, tol.Effect)
+	// Dead-node taints: NoSchedule is tolerated, NoExecute only for a bounded time so the pod gets rescheduled.
+	for _, key := range []string{"node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"} {
+		var noSchedule, boundedNoExecute bool
+		for _, tol := range spec.Tolerations {
+			if tol.Key != key {
+				continue
+			}
+			switch tol.Effect {
+			case corev1.TaintEffectNoSchedule:
+				noSchedule = true
+			case corev1.TaintEffectNoExecute:
+				boundedNoExecute = tol.TolerationSeconds != nil && *tol.TolerationSeconds > 0
+			default:
+				t.Errorf("toleration %s has effect %q: would tolerate NoExecute forever", key, tol.Effect)
+			}
+		}
+		if !noSchedule || !boundedNoExecute {
+			t.Errorf("%s: want NoSchedule + NoExecute with tolerationSeconds, got noSchedule=%v boundedNoExecute=%v", key, noSchedule, boundedNoExecute)
 		}
 	}
 }
@@ -181,6 +198,31 @@ func TestHostNetworkRolloutDoesNotSurge(t *testing.T) {
 	d = mustRender(t, "--set", "hostNetwork=false", "--set", "dnsPolicy=ClusterFirst").deployment
 	if d.Spec.Template.Spec.HostNetwork {
 		t.Error("hostNetwork=false not honored")
+	}
+}
+
+// requireRule fails unless some rule grants all verbs on group/resource; if name == "" the rule must be unrestricted, else it must list name in resourceNames.
+func requireRule(t *testing.T, rules []rbacv1.PolicyRule, group, resource, name string, verbs ...string) {
+	t.Helper()
+	has := func(list []string, v string) bool {
+		for _, x := range list {
+			if x == v {
+				return true
+			}
+		}
+		return false
+	}
+	for _, verb := range verbs {
+		ok := false
+		for _, r := range rules {
+			if has(r.APIGroups, group) && has(r.Resources, resource) && has(r.Verbs, verb) &&
+				((name == "" && len(r.ResourceNames) == 0) || (name != "" && has(r.ResourceNames, name))) {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf("missing RBAC rule: %s/%s name=%q verb=%s", group, resource, name, verb)
+		}
 	}
 }
 
@@ -203,6 +245,19 @@ func TestRBACLeastPrivilege(t *testing.T) {
 				}
 			}
 		}
+	}
+
+	requireRule(t, r.clusterRole.Rules, "", "nodes", "", "get", "list", "watch")
+	requireRule(t, r.clusterRole.Rules, "", "services", "", "get", "list", "watch")
+	requireRule(t, r.clusterRole.Rules, "authentication.k8s.io", "tokenreviews", "", "create")
+	requireRule(t, r.clusterRole.Rules, "authorization.k8s.io", "subjectaccessreviews", "", "create")
+	requireRule(t, r.role.Rules, "coordination.k8s.io", "leases", "", "get", "create", "update")
+	requireRule(t, r.role.Rules, "", "events", "", "create", "patch")
+	requireRule(t, r.role.Rules, "", "configmaps", "extension-apiserver-authentication", "get")
+	requireRule(t, r.role.Rules, "", "serviceaccounts", "", "create")
+	for _, sa := range []string{"node-controller", "service-controller", "route-controller"} {
+		requireRule(t, r.role.Rules, "", "serviceaccounts", sa, "get")
+		requireRule(t, r.role.Rules, "", "serviceaccounts/token", sa, "create")
 	}
 
 	if r.role.Namespace != "kube-system" || r.roleBinding.Namespace != "kube-system" {

@@ -27,7 +27,9 @@ replicaCount: 1
 
 # CCM must reach the API server and initialize nodes before the CNI is up.
 hostNetwork: true
-dnsPolicy: ClusterFirstWithHostNet
+# "Default" = node resolv.conf: CoreDNS is not up until nodes are initialized
+# (worker-only clusters). Use ClusterFirstWithHostNet only if you need in-cluster DNS names.
+dnsPolicy: Default
 
 # Secure-serving port (/healthz, /metrics). With hostNetwork this is a host port.
 securePort: 10258
@@ -51,8 +53,18 @@ tolerations:
     effect: NoSchedule
   - key: node.kubernetes.io/not-ready
     operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/not-ready
+    operator: Exists
+    effect: NoExecute
+    tolerationSeconds: 300
   - key: node.kubernetes.io/unreachable
     operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/unreachable
+    operator: Exists
+    effect: NoExecute
+    tolerationSeconds: 300
 
 podSecurityContext:
   runAsNonRoot: true
