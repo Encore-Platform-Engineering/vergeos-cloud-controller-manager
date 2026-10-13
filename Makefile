@@ -1,5 +1,5 @@
 BINARY_NAME := vergeos-cloud-controller-manager
-IMAGE_NAME := ghcr.io/verge-io/vergeos-cloud-controller-manager
+IMAGE_NAME := ghcr.io/encore-platform-engineering/vergeos-cloud-controller-manager
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 GOFLAGS := -ldflags="-s -w"
 
