@@ -73,6 +73,11 @@ func TestChart_CloudConfigParses(t *testing.T) {
 		args  []string
 		check func(t *testing.T, cfg *cloudConfig)
 	}{
+		{"defaults", nil, func(t *testing.T, cfg *cloudConfig) {
+			if cfg.LoadBalancer.Enabled {
+				t.Error("LB must be off by default")
+			}
+		}},
 		{"lb enabled", lb, func(t *testing.T, cfg *cloudConfig) {
 			if !cfg.LoadBalancer.Enabled || cfg.LoadBalancer.NetworkID != 5 || len(cfg.LoadBalancer.IPPool) != 2 {
 				t.Errorf("lb config = %+v", cfg.LoadBalancer)
