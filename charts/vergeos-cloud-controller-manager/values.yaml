@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/verge-io/vergeos-cloud-controller-manager
+  repository: ghcr.io/encore-platform-engineering/vergeos-cloud-controller-manager
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 

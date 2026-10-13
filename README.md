@@ -113,7 +113,7 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `image.repository` | `ghcr.io/verge-io/vergeos-cloud-controller-manager` | Container image |
+| `image.repository` | `ghcr.io/encore-platform-engineering/vergeos-cloud-controller-manager` | Container image |
 | `image.tag` | `latest` | Image tag |
 | `imagePullSecrets` | `[]` | Image pull secrets for private registries |
 | `vergeos.host` | `""` | VergeOS API host (e.g., `10.8.8.26`) |
@@ -185,7 +185,7 @@ The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet ru
 make build            # Local binary → bin/vergeos-cloud-controller-manager
 make build-linux      # Cross-compile for Linux amd64
 make docker-build     # Container image (linux/amd64, local)
-make docker-push      # Build and push to ghcr.io/verge-io
+make docker-push      # Build and push to ghcr.io/encore-platform-engineering
 make test             # All tests with -race
 make vet              # Static analysis
 ```
