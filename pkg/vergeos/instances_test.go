@@ -802,3 +802,75 @@ func TestInstanceMetadata_LegacyProviderIDEmitsUUID(t *testing.T) {
 		t.Errorf("providerID = %s", meta.ProviderID)
 	}
 }
+
+func TestLegacyKeyMustBeDigits(t *testing.T) {
+	for _, id := range []string{"+5", "-1", "0x10"} {
+		if _, err := parseProviderID("vergeos://" + id); err == nil {
+			t.Errorf("%q should be rejected", id)
+		}
+	}
+}
+
+func TestFindVM_RejectsQuote(t *testing.T) {
+	f := &fakeVMs{}
+	_, err := (&instances{vms: f}).getVM(context.Background(), testNode("a' or name ne 'b", ""))
+	if err == nil || len(f.filters) != 0 {
+		t.Errorf("expected rejection without API call, err=%v filters=%v", err, f.filters)
+	}
+}
+
+// API failures (including 404 from the list endpoint) must never read as "VM gone".
+func TestListFailure_IsErrorNotAbsent(t *testing.T) {
+	failures := map[string]error{
+		"404":   &vergeos.APIError{StatusCode: 404},
+		"500":   &vergeos.APIError{StatusCode: 500},
+		"plain": fmt.Errorf("boom"),
+	}
+	nodes := map[string]*v1.Node{
+		"uuid":       testNode("n", "vergeos://"+testUUID),
+		"name":       testNode("n", ""),
+		"systemUUID": func() *v1.Node { n := testNode("n", ""); n.Status.NodeInfo.SystemUUID = testUUID; return n }(),
+	}
+	for fname, ferr := range failures {
+		for nname, node := range nodes {
+			i := &instances{vms: &mockVMClient{listFunc: func(ctx context.Context, opts ...vergeos.ListOption) ([]vergeos.VM, error) {
+				return nil, ferr
+			}}, machineStatus: noAgent()}
+			t.Run(fname+"/"+nname, func(t *testing.T) {
+				if ex, err := i.InstanceExists(context.Background(), node); err == nil || ex {
+					t.Errorf("InstanceExists = %v, %v; want error", ex, err)
+				}
+				if sd, err := i.InstanceShutdown(context.Background(), node); err == nil || sd {
+					t.Errorf("InstanceShutdown = %v, %v; want error", sd, err)
+				}
+				if m, err := i.InstanceMetadata(context.Background(), node); err == nil || m != nil {
+					t.Errorf("InstanceMetadata = %v, %v; want error", m, err)
+				}
+			})
+		}
+	}
+}
+
+func TestGetByKey_NonNotFoundErrorPropagates(t *testing.T) {
+	i := &instances{vms: &mockVMClient{getFunc: func(ctx context.Context, id int) (*vergeos.VM, error) {
+		return nil, &vergeos.APIError{StatusCode: 500}
+	}}}
+	if ex, err := i.InstanceExists(context.Background(), testNode("n", "vergeos://42")); err == nil || ex {
+		t.Errorf("got %v, %v; want error", ex, err)
+	}
+}
+
+func TestInstanceShutdown_UUIDProviderID(t *testing.T) {
+	f := &fakeVMs{byFilter: map[string][]vergeos.VM{
+		uuidFilter(testUUID): {{ID: 7, UUID: testUUID, PowerState: false}},
+	}}
+	sd, err := (&instances{vms: f}).InstanceShutdown(context.Background(), testNode("n", "vergeos://"+testUUID))
+	if err != nil || !sd {
+		t.Errorf("got %v, %v; want true, nil", sd, err)
+	}
+	f.byFilter[uuidFilter(testUUID)][0].PowerState = true
+	sd, err = (&instances{vms: f}).InstanceShutdown(context.Background(), testNode("n", "vergeos://"+testUUID))
+	if err != nil || sd {
+		t.Errorf("running: got %v, %v; want false, nil", sd, err)
+	}
+}

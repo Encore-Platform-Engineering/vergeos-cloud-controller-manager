@@ -21,6 +21,8 @@ const providerPrefix = "vergeos://"
 // errVMNotFound is wrapped by lookups that match no (non-snapshot) VM.
 var errVMNotFound = errors.New("VM not found")
 
+var digitsRe = regexp.MustCompile(`^[0-9]+$`)
+
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type instances struct {
@@ -54,7 +56,7 @@ func parseProviderID(providerID string) (vmRef, error) {
 		return vmRef{uuid: strings.ToLower(idStr)}, nil
 	}
 	id, err := strconv.Atoi(idStr)
-	if err != nil {
+	if err != nil || !digitsRe.MatchString(idStr) {
 		return vmRef{}, fmt.Errorf("invalid provider ID %q: expected a VM UUID or integer ID", providerID)
 	}
 	return vmRef{key: id}, nil
@@ -73,10 +75,15 @@ func formatInstanceType(cpuCores, ramMB int) string {
 // findVM lists non-snapshot VMs matching field eq value.
 // Returns errVMNotFound for no match and an error for more than one.
 func (i *instances) findVM(ctx context.Context, field, value string) (*vergeos.VM, error) {
+	// Values are interpolated into a filter expression; refuse quoting characters.
+	if strings.ContainsAny(value, `'\\`) {
+		return nil, fmt.Errorf("invalid %s %q: contains quote or backslash", field, value)
+	}
 	filter := fmt.Sprintf("%s eq '%s' and is_snapshot eq false", field, value)
 	vms, err := i.vms.List(ctx, vergeos.WithFilter(filter))
 	if err != nil {
-		return nil, fmt.Errorf("listing VMs by %s %q: %w", field, value, err)
+		// %v, not %w: a 404 from the list call is an API failure, not "VM absent".
+		return nil, fmt.Errorf("listing VMs by %s %q: %v", field, value, err)
 	}
 	switch len(vms) {
 	case 0:
@@ -104,6 +111,9 @@ func (i *instances) getVM(ctx context.Context, node *v1.Node) (*vergeos.VM, erro
 		}
 		vm, err := i.vms.Get(ctx, ref.key)
 		if err != nil {
+			if vergeos.IsNotFoundError(err) {
+				return nil, fmt.Errorf("%w: VM key %d: %v", errVMNotFound, ref.key, err)
+			}
 			return nil, err
 		}
 		if vm.IsSnapshot {
@@ -157,7 +167,7 @@ func (i *instances) InstanceShutdown(ctx context.Context, node *v1.Node) (bool, 
 }
 
 func isVMNotFound(err error) bool {
-	return vergeos.IsNotFoundError(err) || errors.Is(err, errVMNotFound)
+	return errors.Is(err, errVMNotFound)
 }
 
 func usableIP(s string) (net.IP, bool) {

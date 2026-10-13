@@ -120,7 +120,7 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `vergeos.apiKey` | `""` | API key authentication |
 | `vergeos.verifySSL` | `"true"` | TLS certificate verification (set to `"false"` for self-signed certs) |
 | `vergeos.existingSecret` | `""` | Use an existing Secret for credentials |
-| `nodeNetworkID` | `0` | Only use NICs on this vnet ID for node InternalIPs (0 = all NICs) |
+| `nodeNetworkID` | `0` | Only use NIC DHCP leases on this vnet ID for node InternalIPs (0 = all NICs); guest-agent IPs are not filtered |
 | `loadBalancer.enabled` | `true` | Enable LoadBalancer support |
 | `loadBalancer.networkID` | `0` | VNet network ID |
 | `loadBalancer.ipPool` | `[]` | Available LB IP addresses |
