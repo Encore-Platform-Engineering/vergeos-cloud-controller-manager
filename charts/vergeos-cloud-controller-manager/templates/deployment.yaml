@@ -5,6 +5,14 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if .Values.hostNetwork }}
+  # hostNetwork pods bind a host port: a surge pod could never schedule next to the old one.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  {{- end }}
   selector:
     matchLabels:
       app: {{ .Release.Name }}
@@ -14,6 +22,11 @@ spec:
         app: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ .Release.Name }}
+      priorityClassName: {{ .Values.priorityClassName }}
+      hostNetwork: {{ .Values.hostNetwork }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -22,13 +35,27 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if gt (int .Values.replicaCount) 1 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: {{ .Release.Name }}
+      {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: vergeos-cloud-controller-manager
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /usr/local/bin/vergeos-cloud-controller-manager
@@ -36,7 +63,30 @@ spec:
             - --cloud-config=/etc/kubernetes/vergeos-cloud-config.json
             - --use-service-account-credentials=true
             - --leader-elect=true
+            - --secure-port={{ .Values.securePort }}
             - --v=2
+          ports:
+            - name: https
+              containerPort: {{ .Values.securePort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
           envFrom:
             - secretRef:
                 name: {{ .Values.vergeos.existingSecret | default (printf "%s-credentials" .Release.Name) }}

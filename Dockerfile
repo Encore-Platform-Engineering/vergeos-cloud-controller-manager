@@ -15,4 +15,6 @@ RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /vergeos-ccm /usr/local/bin/vergeos-cloud-controller-manager
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/vergeos-cloud-controller-manager"]

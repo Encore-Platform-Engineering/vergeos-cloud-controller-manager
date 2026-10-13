@@ -1,6 +1,7 @@
 image:
   repository: ghcr.io/encore-platform-engineering/vergeos-cloud-controller-manager
-  tag: "0.1.0"
+  # Empty = "v" + Chart.appVersion (CI publishes images on git tags v*).
+  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -15,22 +16,56 @@ vergeos:
 # Limit node InternalIPs (from NIC DHCP leases) to NICs on this vnet ID; 0 = any.
 nodeNetworkID: 0
 
+# LoadBalancer support is opt-in. When enabled, networkID and a non-empty
+# ipPool are required (the chart fails to render without them).
 loadBalancer:
-  enabled: true
+  enabled: false
   networkID: 0
   ipPool: []
 
 replicaCount: 1
 
-nodeSelector:
-  node-role.kubernetes.io/control-plane: "true"
+# CCM must reach the API server and initialize nodes before the CNI is up.
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+
+# Secure-serving port (/healthz, /metrics). With hostNetwork this is a host port.
+securePort: 10258
+
+priorityClassName: system-cluster-critical
+
+# No nodeSelector by default: works on kubeadm/RKE2 control planes and on
+# worker-only clusters (hosted control plane, e.g. k0smotron).
+nodeSelector: {}
+
+# Overrides the default (preferred pod anti-affinity across nodes when replicaCount > 1).
+affinity: {}
 
 tolerations:
   - key: node-role.kubernetes.io/control-plane
-    effect: NoSchedule
+    operator: Exists
+  - key: node-role.kubernetes.io/master
+    operator: Exists
   - key: node.cloudprovider.kubernetes.io/uninitialized
-    value: "true"
+    operator: Exists
     effect: NoSchedule
+  - key: node.kubernetes.io/not-ready
+    operator: Exists
+  - key: node.kubernetes.io/unreachable
+    operator: Exists
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
 
 resources:
   requests:
