@@ -28,8 +28,24 @@ jobs:
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
+      - run: go build ./...
       - run: go vet ./...
-      - run: go test ./...
+      # REQUIRE_HELM makes the chart tests fail (not skip) if helm is missing.
+      - run: go test -race ./...
+        env:
+          REQUIRE_HELM: "1"
+      - name: Helm lint
+        run: |
+          helm lint charts/vergeos-cloud-controller-manager \
+            --set vergeos.host=https://vergeos.example --set vergeos.apiKey=x \
+            --set loadBalancer.networkID=5 --set 'loadBalancer.ipPool={10.0.0.1}'
+      - name: Helm template (LB on / LB off / private CA)
+        run: |
+          chart=charts/vergeos-cloud-controller-manager
+          common="--set vergeos.host=https://vergeos.example --set vergeos.apiKey=x"
+          helm template rel $chart $common --set loadBalancer.enabled=true --set loadBalancer.networkID=5 --set 'loadBalancer.ipPool={10.0.0.1}' >/dev/null
+          helm template rel $chart $common --set loadBalancer.enabled=false >/dev/null
+          helm template rel $chart $common --set loadBalancer.enabled=false --set vergeos.caSecret=my-ca >/dev/null
 
   build:
     name: Build image

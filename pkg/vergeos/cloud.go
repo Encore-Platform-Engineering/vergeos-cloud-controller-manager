@@ -1,12 +1,11 @@
 package vergeos
 
 import (
+	"fmt"
 	"io"
 
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
-
-	vergeos "github.com/verge-io/govergeos"
 )
 
 const ProviderName = "vergeos"
@@ -29,25 +28,17 @@ func newCloud(config io.Reader) (*cloud, error) {
 		return nil, err
 	}
 
-	client, err := vergeos.NewClient(vergeos.WithEnvConfig())
+	client, err := newVergeOSClient(cfg)
 	if err != nil {
-		klog.Warningf("Failed to create VergeOS client (will retry on first API call): %v", err)
+		return nil, fmt.Errorf("vergeos cloud provider: %w", err)
 	}
 
-	c := &cloud{config: cfg}
-
-	if client != nil {
-		c.instances = newInstances(client.VMs, client.MachineStatus, client.VMNICs, cfg.NodeNetworkID)
-	} else {
-		c.instances = &instances{}
+	c := &cloud{
+		config:    cfg,
+		instances: newInstances(client.VMs, client.MachineStatus, client.VMNICs, cfg.NodeNetworkID),
 	}
-
 	if cfg.LoadBalancer.Enabled {
-		if client != nil {
-			c.lb = newLoadBalancer(client.VNetRules, client.Networks, client.VNetAddresses, cfg.LoadBalancer)
-		} else {
-			c.lb = newLoadBalancer(nil, nil, nil, cfg.LoadBalancer)
-		}
+		c.lb = newLoadBalancer(client.VNetRules, client.Networks, client.VNetAddresses, cfg.LoadBalancer)
 	}
 
 	return c, nil

@@ -178,9 +178,71 @@ func usableIP(s string) (net.IP, bool) {
 	return ip, true
 }
 
-// guestAgentIPs returns IPv4 addresses reported by qemu-guest-agent, if any.
-func (i *instances) guestAgentIPs(ctx context.Context, vm *vergeos.VM) []string {
-	if i.machineStatus == nil {
+// virtualIfacePrefixes are guest interface name prefixes created by container
+// runtimes, CNIs and bridges; their addresses are never node addresses.
+var virtualIfacePrefixes = []string{
+	"docker", "br", "virbr", "cni", "flannel", "cilium", "cali", "vxlan",
+	"veth", "lxc", "tunl", "weave", "kube-", "nodelocaldns", "dummy", "tun", "tap",
+}
+
+func isVirtualIface(name string) bool {
+	name = strings.ToLower(name)
+	if name == "lo" {
+		return true
+	}
+	for _, p := range virtualIfacePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameMAC(a, b string) bool {
+	ma, errA := net.ParseMAC(a)
+	mb, errB := net.ParseMAC(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return ma.String() == mb.String()
+}
+
+// vmNICs returns the VM's NICs on nodeNetworkID (all when 0), ordered by NIC key.
+func (i *instances) vmNICs(ctx context.Context, vm *vergeos.VM) ([]vergeos.VMNIC, error) {
+	if i.nics == nil {
+		return nil, nil
+	}
+	all, err := i.nics.List(ctx, vm.Machine)
+	if err != nil {
+		return nil, fmt.Errorf("listing NICs for VM %d (machine %d): %w", vm.ID, vm.Machine, err)
+	}
+	nics := make([]vergeos.VMNIC, 0, len(all))
+	for _, nic := range all {
+		if i.nodeNetworkID != 0 && nic.VNET.Int() != i.nodeNetworkID {
+			continue
+		}
+		nics = append(nics, nic)
+	}
+	sort.SliceStable(nics, func(a, b int) bool { return nics[a].ID < nics[b].ID })
+	return nics, nil
+}
+
+// nicLeaseIPs returns machine_nics.ipaddress values (DHCP leases) of nics, in order.
+func nicLeaseIPs(nics []vergeos.VMNIC) []string {
+	var ips []string
+	for _, nic := range nics {
+		if _, ok := usableIP(nic.IPAddress); ok {
+			ips = append(ips, nic.IPAddress)
+		}
+	}
+	return ips
+}
+
+// guestAgentIPs returns IPv4 addresses qemu-guest-agent reports for interfaces
+// whose MAC matches one of nics (so nodeNetworkID applies), skipping virtual
+// interfaces (docker/CNI/bridges), loopback and link-local. Ordered by NIC.
+func (i *instances) guestAgentIPs(ctx context.Context, vm *vergeos.VM, nics []vergeos.VMNIC) []string {
+	if i.machineStatus == nil || len(nics) == 0 {
 		return nil
 	}
 	status, err := i.machineStatus.Get(ctx, vm.Machine)
@@ -192,42 +254,22 @@ func (i *instances) guestAgentIPs(ctx context.Context, vm *vergeos.VM) []string 
 		return nil
 	}
 	var ips []string
-	for _, iface := range status.AgentGuestInfo.Network {
-		for _, addr := range iface.IPAddresses {
-			if addr.Type != "ipv4" || addr.Address == "" {
+	for _, nic := range nics {
+		for _, iface := range status.AgentGuestInfo.Network {
+			if isVirtualIface(iface.Name) || !sameMAC(iface.HardwareAddress, nic.MAC) {
 				continue
 			}
-			if _, ok := usableIP(addr.Address); !ok {
-				continue
+			for _, addr := range iface.IPAddresses {
+				if addr.Type != "ipv4" {
+					continue
+				}
+				if _, ok := usableIP(addr.Address); ok {
+					ips = append(ips, addr.Address)
+				}
 			}
-			ips = append(ips, addr.Address)
 		}
 	}
 	return ips
-}
-
-// nicLeaseIPs returns machine_nics.ipaddress values (DHCP leases) ordered by NIC key,
-// limited to nodeNetworkID when configured.
-func (i *instances) nicLeaseIPs(ctx context.Context, vm *vergeos.VM) ([]string, error) {
-	if i.nics == nil {
-		return nil, nil
-	}
-	nics, err := i.nics.List(ctx, vm.Machine)
-	if err != nil {
-		return nil, fmt.Errorf("listing NICs for VM %d (machine %d): %w", vm.ID, vm.Machine, err)
-	}
-	sort.SliceStable(nics, func(a, b int) bool { return nics[a].ID < nics[b].ID })
-	var ips []string
-	for _, nic := range nics {
-		if i.nodeNetworkID != 0 && nic.VNET.Int() != i.nodeNetworkID {
-			continue
-		}
-		if _, ok := usableIP(nic.IPAddress); !ok {
-			continue
-		}
-		ips = append(ips, nic.IPAddress)
-	}
-	return ips, nil
 }
 
 func (i *instances) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloudprovider.InstanceMetadata, error) {
@@ -236,14 +278,22 @@ func (i *instances) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloud
 		return nil, err
 	}
 
-	// Guest agent data first; the stock Ubuntu image has no agent, so fall back
-	// to the NIC DHCP leases VergeOS already tracks.
-	ips := i.guestAgentIPs(ctx, vm)
+	// NIC DHCP leases (machine_nics.ipaddress) are authoritative and honour
+	// nodeNetworkID. Guest-agent IPs are only a fallback for NICs without a
+	// lease (static addressing) and are limited to interfaces whose MAC matches
+	// a VM NIC on that vnet.
+	nics, err := i.vmNICs(ctx, vm)
+	if err != nil {
+		return nil, err
+	}
+	ips := nicLeaseIPs(nics)
 	if len(ips) == 0 {
-		ips, err = i.nicLeaseIPs(ctx, vm)
-		if err != nil {
-			return nil, err
-		}
+		ips = i.guestAgentIPs(ctx, vm, nics)
+	}
+	if len(ips) == 0 {
+		// Fail so the node stays uninitialized (tainted) and the controller retries,
+		// instead of initializing it without an InternalIP.
+		return nil, fmt.Errorf("no InternalIP found for VM %d (machine %d, nodeNetworkID=%d) from NIC leases or guest agent; will retry", vm.ID, vm.Machine, i.nodeNetworkID)
 	}
 
 	addresses := make([]v1.NodeAddress, 0, len(ips)+1)

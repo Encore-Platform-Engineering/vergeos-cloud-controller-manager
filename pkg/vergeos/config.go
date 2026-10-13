@@ -9,10 +9,13 @@ import (
 )
 
 type cloudConfig struct {
-	// NodeNetworkID, when set, limits node InternalIPs taken from NIC DHCP leases
-	// to NICs attached to this VergeOS vnet.
-	NodeNetworkID int      `json:"nodeNetworkID"`
-	LoadBalancer  lbConfig `json:"loadBalancer"`
+	// NodeNetworkID, when set, limits node InternalIPs (NIC DHCP leases and
+	// guest-agent IPs matched to a NIC by MAC) to NICs attached to this VergeOS vnet.
+	NodeNetworkID int `json:"nodeNetworkID"`
+	// CAFile is a PEM file with extra CA certificates to trust for the VergeOS
+	// API (private/self-signed CA). Falls back to $VERGEOS_CA_FILE.
+	CAFile       string   `json:"caFile"`
+	LoadBalancer lbConfig `json:"loadBalancer"`
 }
 
 type lbConfig struct {
