@@ -114,22 +114,33 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | Value | Default | Description |
 |-------|---------|-------------|
 | `image.repository` | `ghcr.io/encore-platform-engineering/vergeos-cloud-controller-manager` | Container image |
-| `image.tag` | `latest` | Image tag |
+| `image.tag` | `""` | Image tag; empty = `v` + chart `appVersion` (CI publishes on git tags `v*`) |
 | `imagePullSecrets` | `[]` | Image pull secrets for private registries |
 | `vergeos.host` | `""` | VergeOS API host (e.g., `10.8.8.26`) |
 | `vergeos.apiKey` | `""` | API key authentication |
 | `vergeos.verifySSL` | `"true"` | TLS certificate verification (set to `"false"` for self-signed certs) |
 | `vergeos.existingSecret` | `""` | Use an existing Secret for credentials |
 | `nodeNetworkID` | `0` | Only use NIC DHCP leases on this vnet ID for node InternalIPs (0 = all NICs); guest-agent IPs are not filtered |
-| `loadBalancer.enabled` | `true` | Enable LoadBalancer support |
+| `loadBalancer.enabled` | `false` | Enable LoadBalancer support; requires `networkID` > 0 and a non-empty `ipPool` (chart fails to render otherwise) |
 | `loadBalancer.networkID` | `0` | VNet network ID |
 | `loadBalancer.ipPool` | `[]` | Available LB IP addresses |
 | `replicaCount` | `1` | Number of replicas |
-| `nodeSelector` | `node-role.kubernetes.io/control-plane: "true"` | Schedule on control-plane nodes |
+| `nodeSelector` | `{}` | No selector: runs on control-plane or worker-only clusters (e.g. k0smotron) |
+| `tolerations` | control-plane, master, `node.cloudprovider.kubernetes.io/uninitialized`, not-ready, unreachable (all `operator: Exists`); not-ready/unreachable are tolerated for NoSchedule and, for NoExecute, only `tolerationSeconds: 300` so a dead node's CCM is rescheduled | Lets the CCM start on tainted/uninitialized/NotReady nodes |
+| `affinity` | `{}` | Overrides the default preferred pod anti-affinity (used when `replicaCount` > 1) |
+| `hostNetwork` | `true` | Host networking so the CCM can initialize nodes before the CNI is ready (needs a free host port `securePort`; not allowed by the `baseline`/`restricted` Pod Security levels, so keep it in `kube-system` or set `false` if your CNI is already up) |
+| `dnsPolicy` | `Default` | Pod DNS policy. `Default` uses the node's resolv.conf because CoreDNS isn't running until nodes are initialized (worker-only clusters); set `ClusterFirstWithHostNet` to resolve in-cluster names |
+| `securePort` | `10258` | Secure-serving port; `/healthz` is used for liveness/readiness probes |
+| `priorityClassName` | `system-cluster-critical` | Pod priority class |
+| `podSecurityContext` / `securityContext` | non-root `65532`, read-only rootfs, drop `ALL`, seccomp `RuntimeDefault` | Pod/container hardening |
 | `resources.requests.cpu` | `100m` | CPU request |
 | `resources.requests.memory` | `64Mi` | Memory request |
 | `resources.limits.cpu` | `200m` | CPU limit |
 | `resources.limits.memory` | `128Mi` | Memory limit |
+
+### RBAC
+
+Least privilege: the CCM ServiceAccount has cluster-wide `get/list/watch` on nodes and services plus `tokenreviews`/`subjectaccessreviews` create. In `kube-system` only: leases (`get/create/update`), events, the `extension-apiserver-authentication` ConfigMap, ServiceAccount `create`, and `get` + `serviceaccounts/token create` limited to `node-controller`, `service-controller` and `route-controller`. Those three ServiceAccounts (`--use-service-account-credentials`) get their write permissions from Kubernetes' built-in `system:controller:*` roles.
 
 ### VergeOS Credentials
 

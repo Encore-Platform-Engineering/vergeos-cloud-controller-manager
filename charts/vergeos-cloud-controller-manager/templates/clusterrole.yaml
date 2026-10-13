@@ -1,35 +1,49 @@
+# Cluster-wide: read-only. The shared informers (nodes, services) and the
+# delegated authn/authz of the secure-serving endpoint run as this ServiceAccount.
+# Node/Service writes are done by the per-controller ServiceAccounts
+# (node-controller, service-controller, route-controller) which get their
+# permissions from the built-in system:controller:* roles.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: {{ .Release.Name }}
 rules:
   - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "watch", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["nodes/status"]
-    verbs: ["patch"]
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "watch", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["services/status"]
-    verbs: ["patch"]
+    resources: ["nodes", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+# kube-system only: leader election lease, events for it, the authn config
+# ConfigMap, and the three controller ServiceAccounts (--use-service-account-credentials).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}
+  namespace: kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
+    resourceNames: ["extension-apiserver-authentication"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["endpoints"]
-    verbs: ["get", "list", "watch", "create", "update"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    resources: ["serviceaccounts"]
+    verbs: ["create"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
-    verbs: ["create", "get"]
+    resourceNames: ["node-controller", "service-controller", "route-controller"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
+    resourceNames: ["node-controller", "service-controller", "route-controller"]
     verbs: ["create"]

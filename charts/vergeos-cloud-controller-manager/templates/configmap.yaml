@@ -1,3 +1,11 @@
+{{- if .Values.loadBalancer.enabled }}
+{{- if not (gt (int .Values.loadBalancer.networkID) 0) }}
+{{- fail "loadBalancer.networkID must be > 0 when loadBalancer.enabled=true" }}
+{{- end }}
+{{- if not .Values.loadBalancer.ipPool }}
+{{- fail "loadBalancer.ipPool must list at least one IP when loadBalancer.enabled=true" }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,7 +17,7 @@ data:
       "nodeNetworkID": {{ .Values.nodeNetworkID | default 0 }},
       "loadBalancer": {
         "enabled": {{ .Values.loadBalancer.enabled }},
-        "networkID": {{ .Values.loadBalancer.networkID }},
-        "ipPool": {{ .Values.loadBalancer.ipPool | toJson }}
+        "networkID": {{ .Values.loadBalancer.networkID | default 0 }},
+        "ipPool": {{ .Values.loadBalancer.ipPool | default list | toJson }}
       }
     }

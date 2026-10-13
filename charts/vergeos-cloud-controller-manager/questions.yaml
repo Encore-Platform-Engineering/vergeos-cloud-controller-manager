@@ -33,7 +33,7 @@ questions:
     label: Enable Load Balancer
     description: "Enable LoadBalancer service support via VergeOS VNet rules"
     type: boolean
-    default: true
+    default: false
     group: "Load Balancer"
     show_subquestion_if: true
     subquestions:
@@ -56,9 +56,9 @@ questions:
 
   - variable: image.tag
     label: Image Tag
-    description: "Container image tag"
+    description: "Container image tag (empty = v<chart appVersion>)"
     type: string
-    default: "0.1.0"
+    default: ""
     group: "Advanced"
 
   - variable: replicaCount
