@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -80,12 +79,6 @@ func (o lbOwner) ruleName(protocol string, port int32) string {
 
 func (o lbOwner) hostname() string { return "k8s-lb-" + o.id() }
 
-// legacyRuleRe matches rule names from the old prefix scheme
-// (k8s-<ns>-<svc>-<proto>-<port>) for exactly this namespace and service.
-func legacyRuleRe(namespace, serviceName string) *regexp.Regexp {
-	return regexp.MustCompile("^" + regexp.QuoteMeta(fmt.Sprintf("k8s-%s-%s-", namespace, serviceName)) + `(tcp|udp)-[0-9]+$`)
-}
-
 func legacyHostname(namespace, serviceName string) string {
 	return fmt.Sprintf("k8s-lb-%s-%s", namespace, serviceName)
 }
@@ -110,41 +103,91 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// ruleOwned reports whether r provably belongs to the Service.
-//
-//  1. Exact: description equals the owner marker.
-//  2. Legacy migration: rules written by the old prefix scheme have an empty
-//     description. Adopt one only if its name matches this exact
-//     namespace/service pattern AND its destination IP is an IP the Service
-//     itself already advertises in status. Anything else is left alone.
-func ruleOwned(r vergeos.VNetRule, owner lbOwner, legacy *regexp.Regexp, svcIPs []string) bool {
-	if r.Description == owner.String() {
-		return true
+// legacyRuleOwned reports whether r is an old-scheme rule that provably
+// belongs to svc. The old name (k8s-<ns>-<svc>-<proto>-<port>) is ambiguous
+// (a-b/c and a/b-c produce the same names), so a name match alone proves
+// nothing. We require ALL of:
+//   - empty description (never stamped),
+//   - name exactly equals the legacy name of one of svc's current ports,
+//   - destination IP is already in svc.status.loadBalancer.ingress,
+//   - destination port and target port equal that port's Port and NodePort
+//     (NodePorts are cluster-unique, so a lookalike Service from another
+//     namespace or cluster will not match).
+func legacyRuleOwned(r vergeos.VNetRule, svc *v1.Service, svcIPs []string) bool {
+	if r.Description != "" || !contains(svcIPs, r.DestinationIP) {
+		return false
 	}
-	return r.Description == "" && legacy.MatchString(r.Name) && contains(svcIPs, r.DestinationIP)
+	for _, p := range svc.Spec.Ports {
+		proto := p.Protocol
+		if proto == "" {
+			proto = v1.ProtocolTCP
+		}
+		if proto != v1.ProtocolTCP && proto != v1.ProtocolUDP {
+			continue
+		}
+		vp := protocolToVNetProtocol(proto)
+		if r.Name == fmt.Sprintf("k8s-%s-%s-%s-%d", svc.Namespace, svc.Name, vp, p.Port) &&
+			r.Protocol == vp &&
+			r.DestinationPorts == strconv.Itoa(int(p.Port)) &&
+			p.NodePort != 0 && r.TargetPorts == strconv.Itoa(int(p.NodePort)) {
+			return true
+		}
+	}
+	return false
 }
 
-// addrOwned is ruleOwned for ipalias entries.
-func addrOwned(a *vergeos.VNetAddress, owner lbOwner, ip string, svc *v1.Service) bool {
+// ruleOwned reports whether r provably belongs to the Service: exact owner
+// marker, or a provable legacy rule (see legacyRuleOwned).
+func ruleOwned(r vergeos.VNetRule, owner lbOwner, svc *v1.Service, svcIPs []string) bool {
+	return r.Description == owner.String() || legacyRuleOwned(r, svc, svcIPs)
+}
+
+// ipsOf returns the destination IPs of the given rules.
+func ipsOf(rules []vergeos.VNetRule) map[string]bool {
+	m := map[string]bool{}
+	for _, r := range rules {
+		if r.DestinationIP != "" {
+			m[r.DestinationIP] = true
+		}
+	}
+	return m
+}
+
+// addrState classifies an ipalias relative to svc.
+type addrState int
+
+const (
+	addrForeign addrState = iota // not provably ours
+	addrExact                    // carries our exact marker
+	addrLegacy                   // old-scheme alias, provable via an owned rule at the same IP
+)
+
+// classifyAddr: legacy aliases (empty description, legacy hostname) are only
+// ours if one of the Service's owned rules already points at the same IP.
+func classifyAddr(a *vergeos.VNetAddress, owner lbOwner, ip string, svc *v1.Service, ownedIPs map[string]bool) addrState {
 	if a.Description == owner.String() {
-		return true
+		return addrExact
 	}
-	return a.Description == "" && a.Hostname == legacyHostname(svc.Namespace, svc.Name) && contains(statusIPs(svc), ip)
+	if a.Description == "" && a.Hostname == legacyHostname(svc.Namespace, svc.Name) && ownedIPs[ip] {
+		return addrLegacy
+	}
+	return addrForeign
 }
 
-// listRules returns every rule on the vnet and the subset owned by svc.
+// listRules returns every rule on the vnet and the subset owned by svc,
+// ordered by key so "first owned rule" is deterministic.
 func (l *loadBalancer) listRules(ctx context.Context, owner lbOwner, svc *v1.Service) (all, owned []vergeos.VNetRule, err error) {
 	all, err = l.rules.ListByNetwork(ctx, l.config.NetworkID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing VNet rules: %w", err)
 	}
-	legacy := legacyRuleRe(svc.Namespace, svc.Name)
 	svcIPs := statusIPs(svc)
 	for _, r := range all {
-		if ruleOwned(r, owner, legacy, svcIPs) {
+		if ruleOwned(r, owner, svc, svcIPs) {
 			owned = append(owned, r)
 		}
 	}
+	sort.Slice(owned, func(i, j int) bool { return owned[i].Key < owned[j].Key })
 	return all, owned, nil
 }
 
@@ -201,6 +244,7 @@ func (l *loadBalancer) checkIP(ctx context.Context, ip string, all, owned []verg
 			return ipBusy, nil
 		}
 	}
+	ownedIPs := ipsOf(owned)
 	if l.addrs == nil {
 		return ipFree, nil
 	}
@@ -211,7 +255,7 @@ func (l *loadBalancer) checkIP(ctx context.Context, ip string, all, owned []verg
 	if err != nil {
 		return ipBusy, fmt.Errorf("checking VNet address for %s: %w", ip, err)
 	}
-	if addr != nil && addrOwned(addr, owner, ip, svc) {
+	if addr != nil && classifyAddr(addr, owner, ip, svc, ownedIPs) != addrForeign {
 		return ipOurs, nil
 	}
 	return ipBusy, nil
@@ -386,11 +430,18 @@ func (d desiredRule) matches(r vergeos.VNetRule) bool {
 		sameIPSet(r.TargetIP, d.targetIP) && r.TargetPorts == d.targetPorts
 }
 
-// applyRules activates rule changes. If it fails the pending flag survives so
-// the next call retries the apply even when no diff remains.
+// applyRules activates rule changes. It also applies when an earlier apply
+// failed (in-memory flag) or the vnet itself reports need_fw_apply (covers a
+// CCM crash between writing rules and applying them).
 func (l *loadBalancer) applyRules(ctx context.Context, changed bool) error {
 	if !changed && !l.applyPending {
-		return nil
+		net, err := l.network.Get(ctx, l.config.NetworkID)
+		if err != nil {
+			return fmt.Errorf("getting VNet %d: %w", l.config.NetworkID, err)
+		}
+		if net == nil || !net.NeedFWApply {
+			return nil
+		}
 	}
 	l.applyPending = true
 	if err := l.network.ApplyRules(ctx, l.config.NetworkID); err != nil {
@@ -400,16 +451,31 @@ func (l *loadBalancer) applyRules(ctx context.Context, changed bool) error {
 	return nil
 }
 
-// ensureAddress makes sure the ipalias for ip exists and is owned by us.
-func (l *loadBalancer) ensureAddress(ctx context.Context, ip string, owner lbOwner) error {
+// ensureAddress makes sure the ipalias for ip exists and is ours. A foreign
+// alias is never claimed; a provable legacy alias is stamped with our marker.
+func (l *loadBalancer) ensureAddress(ctx context.Context, ip string, owner lbOwner, svc *v1.Service, ownedIPs map[string]bool) error {
 	if l.addrs == nil {
 		return nil
 	}
-	_, err := l.addrs.GetByIP(ctx, l.config.NetworkID, ip)
-	if err == nil {
-		return nil
+	addr, err := l.addrs.GetByIP(ctx, l.config.NetworkID, ip)
+	if err == nil && addr != nil {
+		switch classifyAddr(addr, owner, ip, svc, ownedIPs) {
+		case addrExact:
+			return nil
+		case addrLegacy:
+			if _, err := l.addrs.Update(ctx, int(addr.Key), &vergeos.VNetAddressUpdateRequest{
+				Hostname:    strPtr(owner.hostname()),
+				Description: strPtr(owner.String()),
+			}); err != nil {
+				return fmt.Errorf("adopting legacy VNet address for %s: %w", ip, err)
+			}
+			klog.Infof("Adopted legacy VNet address entry for %s", ip)
+			return nil
+		default:
+			return fmt.Errorf("VNet address %s exists but is not owned by LoadBalancer %s/%s", ip, svc.Namespace, svc.Name)
+		}
 	}
-	if !vergeos.IsNotFoundError(err) {
+	if err != nil && !vergeos.IsNotFoundError(err) {
 		return fmt.Errorf("checking VNet address for %s: %w", ip, err)
 	}
 	if _, err := l.addrs.Create(ctx, &vergeos.VNetAddressCreateRequest{
@@ -426,7 +492,7 @@ func (l *loadBalancer) ensureAddress(ctx context.Context, ip string, owner lbOwn
 }
 
 // deleteOwnedAddresses removes the ipalias for each ip, but only if we own it.
-func (l *loadBalancer) deleteOwnedAddresses(ctx context.Context, ips []string, owner lbOwner, svc *v1.Service) error {
+func (l *loadBalancer) deleteOwnedAddresses(ctx context.Context, ips []string, owner lbOwner, svc *v1.Service, ownedIPs map[string]bool) error {
 	if l.addrs == nil {
 		return nil
 	}
@@ -445,8 +511,7 @@ func (l *loadBalancer) deleteOwnedAddresses(ctx context.Context, ips []string, o
 			errs = append(errs, fmt.Errorf("finding VNet address for %s: %w", ip, err))
 			continue
 		}
-		if addr == nil || !addrOwned(addr, owner, ip, svc) {
-			klog.Infof("Not deleting VNet address %s: not owned by %s/%s", ip, svc.Namespace, svc.Name)
+		if addr == nil || classifyAddr(addr, owner, ip, svc, ownedIPs) == addrForeign {
 			continue
 		}
 		if err := l.addrs.Delete(ctx, int(addr.Key)); err != nil && !vergeos.IsNotFoundError(err) {
@@ -625,7 +690,7 @@ func (l *loadBalancer) converge(ctx context.Context, clusterName string, svc *v1
 		return "", err
 	}
 
-	if err := l.ensureAddress(ctx, ip, owner); err != nil {
+	if err := l.ensureAddress(ctx, ip, owner, svc, ipsOf(owned)); err != nil {
 		return "", err
 	}
 
@@ -649,7 +714,7 @@ func (l *loadBalancer) converge(ctx context.Context, clusterName string, svc *v1
 			oldIPs = append(oldIPs, s)
 		}
 	}
-	if err := l.deleteOwnedAddresses(ctx, oldIPs, owner, svc); err != nil {
+	if err := l.deleteOwnedAddresses(ctx, oldIPs, owner, svc, ipsOf(owned)); err != nil {
 		return "", err
 	}
 	klog.Infof("LoadBalancer %s/%s converged at %s", svc.Namespace, svc.Name, ip)
@@ -668,7 +733,12 @@ func (l *loadBalancer) EnsureLoadBalancerDeleted(ctx context.Context, clusterNam
 
 	var errs []error
 	changed := false
+	ownedIPs := ipsOf(owned)
 	ips := statusIPs(service)
+	// An ipalias can be orphaned by a failed Ensure (alias is created before
+	// the rules), leaving no rule or status IP to find it by. Probe the whole
+	// pool; only aliases carrying our exact marker are removed.
+	ips = append(ips, l.config.IPPool...)
 	if req, err := requestedIP(service); err == nil && req != "" {
 		ips = append(ips, req)
 	}
@@ -688,5 +758,5 @@ func (l *loadBalancer) EnsureLoadBalancerDeleted(ctx context.Context, clusterNam
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	return l.deleteOwnedAddresses(ctx, ips, owner, service)
+	return l.deleteOwnedAddresses(ctx, ips, owner, service, ownedIPs)
 }

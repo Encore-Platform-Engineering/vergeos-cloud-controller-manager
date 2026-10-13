@@ -28,6 +28,7 @@ type fakeVNet struct {
 	failCreate func(name string) error
 	failDelete func(name string) error
 	failApply  error
+	needFW     bool
 }
 
 func (f *fakeVNet) key() vergeos.FlexInt { f.nextKey++; return vergeos.FlexInt(f.nextKey) }
@@ -144,9 +145,33 @@ func (a fakeAddrs) GetByIP(ctx context.Context, vnetID int, ip string) (*vergeos
 func (a fakeAddrs) Create(ctx context.Context, req *vergeos.VNetAddressCreateRequest) (*vergeos.VNetAddress, error) {
 	a.f.mu.Lock()
 	defer a.f.mu.Unlock()
+	for _, x := range a.f.addrs {
+		if x.IP == req.IP {
+			return nil, fmt.Errorf("duplicate address %s", req.IP)
+		}
+	}
 	x := vergeos.VNetAddress{Key: a.f.key(), VNet: vergeos.FlexInt(req.VNet), IP: req.IP, Type: req.Type, Hostname: req.Hostname, Description: req.Description}
 	a.f.addrs = append(a.f.addrs, x)
 	return &x, nil
+}
+func (a fakeAddrs) Update(ctx context.Context, id int, req *vergeos.VNetAddressUpdateRequest) (*vergeos.VNetAddress, error) {
+	a.f.mu.Lock()
+	defer a.f.mu.Unlock()
+	for i := range a.f.addrs {
+		x := &a.f.addrs[i]
+		if int(x.Key) != id {
+			continue
+		}
+		if req.Hostname != nil {
+			x.Hostname = *req.Hostname
+		}
+		if req.Description != nil {
+			x.Description = *req.Description
+		}
+		cp := *x
+		return &cp, nil
+	}
+	return nil, &vergeos.NotFoundError{Resource: "vnet_addresses", ID: id}
 }
 func (a fakeAddrs) Delete(ctx context.Context, id int) error {
 	a.f.mu.Lock()
@@ -161,7 +186,9 @@ func (a fakeAddrs) Delete(ctx context.Context, id int) error {
 }
 
 func (n fakeNet) Get(ctx context.Context, id int) (*vergeos.Network, error) {
-	return &vergeos.Network{}, nil
+	n.f.mu.Lock()
+	defer n.f.mu.Unlock()
+	return &vergeos.Network{NeedFWApply: n.f.needFW}, nil
 }
 func (n fakeNet) ApplyRules(ctx context.Context, id int) error {
 	n.f.mu.Lock()
@@ -170,6 +197,7 @@ func (n fakeNet) ApplyRules(ctx context.Context, id int) error {
 		return n.f.failApply
 	}
 	n.f.applies++
+	n.f.needFW = false
 	return nil
 }
 
@@ -887,8 +915,8 @@ func TestLegacy_AdoptsOnlyProvablyOwnedRules(t *testing.T) {
 	for _, r := range f.rules {
 		names = append(names, r.Name)
 	}
-	if len(f.rules) != 3 {
-		t.Fatalf("expected adopted rule + 2 untouched foreign rules, got %v", names)
+	if len(f.rules) != 4 {
+		t.Fatalf("expected adopted rule + 3 untouched rules (stale port, web-api, wrong IP), got %v", names)
 	}
 	r := f.ruleFor(t, "80", "10.0.0.100")
 	if r.Name != owner.ruleName("tcp", 80) || r.Description != owner.String() {
@@ -899,11 +927,16 @@ func TestLegacy_AdoptsOnlyProvablyOwnedRules(t *testing.T) {
 	}
 	f.ruleFor(t, "443", "10.0.0.101")
 	f.ruleFor(t, "81", "10.0.0.101")
-
+	if stale := f.ruleFor(t, "9999", "10.0.0.100"); stale.Description != "" {
+		t.Errorf("legacy rule for a port not in the spec cannot be proven and must stay untouched: %+v", stale)
+	}
+	if a := f.addrs[0]; a.Description != owner.String() {
+		t.Errorf("legacy ipalias should be stamped on adoption: %+v", a)
+	}
 	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", svc); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.rules) != 2 || !f.hasAddr("10.0.0.101") || f.hasAddr("10.0.0.100") {
+	if len(f.rules) != 3 || !f.hasAddr("10.0.0.101") || f.hasAddr("10.0.0.100") {
 		t.Errorf("delete removed the wrong things: rules=%+v addrs=%+v", f.rules, f.addrs)
 	}
 }
@@ -925,5 +958,127 @@ func TestLegacy_NotAdoptedWithoutStatusIP(t *testing.T) {
 	// Ensure goes elsewhere rather than stealing the legacy IP.
 	if ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1")); ip != "10.0.0.101" {
 		t.Errorf("ip = %s, legacy-used IP must be skipped", ip)
+	}
+}
+
+func TestLegacy_DashAmbiguousNamesNotAdopted(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	// The old prefix bug made a-b/c report a/b-c's IP, so both statuses hold it.
+	s1 := testService("a-b", "c", []v1.ServicePort{tcp(80, 30080)})
+	s2 := testService("a", "b-c", []v1.ServicePort{tcp(80, 30081)})
+	for _, s := range []*v1.Service{s1, s2} {
+		s.Status.LoadBalancer.Ingress = []v1.LoadBalancerIngress{{IP: "10.0.0.100"}}
+	}
+	// Legacy objects belong to a/b-c (NodePort 30081); same names as a-b/c would use.
+	f.rules = []vergeos.VNetRule{legacyRule(1, "k8s-a-b-c-tcp-80", "10.0.0.100", "80", "30081")}
+	f.addrs = []vergeos.VNetAddress{{Key: 1, IP: "10.0.0.100", Type: "ipalias", Hostname: "k8s-lb-a-b-c"}}
+
+	if _, ok, _ := lb.GetLoadBalancer(context.Background(), "c", s1); ok {
+		t.Error("a-b/c must not claim a/b-c's legacy rule")
+	}
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", s1); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rules) != 1 || !f.hasAddr("10.0.0.100") {
+		t.Fatalf("a-b/c delete destroyed a/b-c's objects: rules=%+v addrs=%+v", f.rules, f.addrs)
+	}
+	// a-b/c gets its own IP and leaves a/b-c's rule alone.
+	if ip := mustEnsure(t, lb, "c", s1, testNodes("10.0.1.1")); ip != "10.0.0.101" {
+		t.Errorf("a-b/c ip = %s", ip)
+	}
+	if got := f.ruleFor(t, "80", "10.0.0.100"); got.TargetPorts != "30081" || got.Description != "" {
+		t.Errorf("a/b-c legacy rule modified: %+v", got)
+	}
+	// The real owner (matching NodePort) still adopts it.
+	if ip := mustEnsure(t, lb, "c", s2, testNodes("10.0.1.1")); ip != "10.0.0.100" {
+		t.Errorf("a/b-c ip = %s", ip)
+	}
+	if f.creates != 1 { // only a-b/c's new rule
+		t.Errorf("a/b-c should be adopted in place, creates=%d", f.creates)
+	}
+}
+
+// --- orphans, ownership checks, apply recovery ---
+
+func TestDelete_RemovesAliasOrphanedByFailedEnsure(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	f.failCreate = func(string) error { return errors.New("down") }
+	if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Fatal("expected error")
+	}
+	if len(f.addrs) != 1 || len(f.rules) != 0 {
+		t.Fatalf("setup: expected an orphan alias, got addrs=%+v rules=%+v", f.addrs, f.rules)
+	}
+	// Service deleted before any successful Ensure: empty status, no rules.
+	f.failCreate = nil
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", svc); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.addrs) != 0 {
+		t.Errorf("orphaned alias leaked: %+v", f.addrs)
+	}
+}
+
+func TestDelete_OrphanProbeLeavesOtherOwnersAliases(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	other := testService("default", "other", []v1.ServicePort{tcp(80, 30081)})
+	f.addrs = []vergeos.VNetAddress{{Key: 1, IP: "10.0.0.100", Type: "ipalias", Description: newLBOwner("c", other).String()}}
+	svc := testService("default", "web", nil)
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", svc); err != nil {
+		t.Fatal(err)
+	}
+	if !f.hasAddr("10.0.0.100") {
+		t.Error("alias of another owner removed")
+	}
+}
+
+func TestEnsure_DoesNotClaimForeignAliasAtOwnedRuleIP(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	owner := newLBOwner("c", svc)
+	f.rules = []vergeos.VNetRule{{Key: 1, Name: owner.ruleName("tcp", 80), Description: owner.String(), Enabled: true,
+		Protocol: "tcp", Direction: "incoming", Action: "translate", DestinationIP: "10.0.0.100", DestinationPorts: "80",
+		TargetIP: "10.0.1.1", TargetPorts: "30080"}}
+	f.addrs = []vergeos.VNetAddress{{Key: 1, IP: "10.0.0.100", Type: "dynamic", Hostname: "vm", Description: "vm lease"}}
+	if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Fatal("must not claim a foreign address")
+	}
+	if f.addrs[0].Description != "vm lease" {
+		t.Errorf("foreign address modified: %+v", f.addrs[0])
+	}
+}
+
+func TestOwnedRuleOrderIsDeterministic(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	owner := newLBOwner("c", svc)
+	mk := func(key int, ip string, port string) vergeos.VNetRule {
+		return vergeos.VNetRule{Key: vergeos.FlexInt(key), Name: fmt.Sprint("r", key), Description: owner.String(), DestinationIP: ip, DestinationPorts: port}
+	}
+	f.rules = []vergeos.VNetRule{mk(9, "10.0.0.101", "81"), mk(2, "10.0.0.100", "80")}
+	st, ok, err := lb.GetLoadBalancer(context.Background(), "c", svc)
+	if err != nil || !ok || st.Ingress[0].IP != "10.0.0.100" {
+		t.Errorf("want lowest-key rule's IP 10.0.0.100, got %v %v %v", st, ok, err)
+	}
+}
+
+func TestEnsure_AppliesWhenVNetNeedsFWApply(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	applies := f.applies
+
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if f.applies != applies {
+		t.Fatal("no apply expected when vnet is clean")
+	}
+	// Simulate a restart after a crash between rule write and apply:
+	// fresh LB (no in-memory flag), vnet still flagged.
+	f.needFW = true
+	lb2 := newLoadBalancer(fakeRules{f}, fakeNet{f}, fakeAddrs{f}, lb.config)
+	mustEnsure(t, lb2, "c", svc, testNodes("10.0.1.1"))
+	if f.applies != applies+1 {
+		t.Errorf("need_fw_apply must trigger an apply, applies=%d", f.applies)
 	}
 }
