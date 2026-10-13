@@ -1173,7 +1173,7 @@ func TestSourceRanges_AllowAllIsUnrestricted(t *testing.T) {
 }
 
 func TestSourceRanges_InvalidFailsClosed(t *testing.T) {
-	for _, bad := range []string{"not-a-cidr", "10.0.0.1", "10.0.0.0/33", "fd00::/8", "10.0.0.0/8'"} {
+	for _, bad := range []string{"not-a-cidr", "10.0.0.1", "10.0.0.0/33", "10.0.0.0/8'"} {
 		lb, f := newTestLB("10.0.0.100")
 		svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
 		svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8", bad}
@@ -1274,5 +1274,67 @@ func TestEnsure_AllocationDoesNotProbePerIP(t *testing.T) {
 	// One GetByIP for ensureAddress at the chosen IP; the pool scan uses a single list.
 	if f.addrGets > 1 || f.addrLists != 1 {
 		t.Errorf("allocation made %d GetByIP and %d list calls", f.addrGets, f.addrLists)
+	}
+}
+
+func TestSourceRanges_BlankListFailsClosed(t *testing.T) {
+	for name, svc := range map[string]*v1.Service{
+		"annotation comma":      {ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{annotationSourceRanges: ","}}},
+		"annotation whitespace": {ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{annotationSourceRanges: "  "}}},
+		"spec blanks":           {Spec: v1.ServiceSpec{LoadBalancerSourceRanges: []string{"", " "}}},
+	} {
+		if got, err := sourceRanges(svc); err == nil {
+			t.Errorf("%s: expected error, got %q", name, got)
+		}
+	}
+	// Truly unset is unrestricted.
+	if got, err := sourceRanges(&v1.Service{}); err != nil || got != "" {
+		t.Errorf("unset: got %q, %v", got, err)
+	}
+	// End to end: nothing is created for a blank annotation.
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	svc.Annotations = map[string]string{annotationSourceRanges: ","}
+	if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Error("expected error")
+	}
+	if len(f.rules) != 0 || len(f.addrs) != 0 {
+		t.Errorf("created rules=%d addrs=%d", len(f.rules), len(f.addrs))
+	}
+}
+
+func TestSourceRanges_DualStack(t *testing.T) {
+	svc := &v1.Service{Spec: v1.ServiceSpec{LoadBalancerSourceRanges: []string{"fd00::/8", "10.0.0.0/8", "2001:db8::/32"}}}
+	if got, err := sourceRanges(svc); err != nil || got != "10.0.0.0/8" {
+		t.Errorf("dual-stack: got %q, %v; want IPv4 only", got, err)
+	}
+	svc.Spec.LoadBalancerSourceRanges = []string{"fd00::/8", "2001:db8::/32"}
+	if got, err := sourceRanges(svc); err == nil {
+		t.Errorf("IPv6-only must error, got %q", got)
+	}
+	// Garbage is still an error even next to valid IPv4.
+	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8", "fd00::/999"}
+	if _, err := sourceRanges(svc); err == nil {
+		t.Error("malformed IPv6 entry must error")
+	}
+}
+
+func TestSourceRanges_SpecWinsOverAnnotation(t *testing.T) {
+	svc := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{annotationSourceRanges: "192.168.0.0/16"}},
+		Spec:       v1.ServiceSpec{LoadBalancerSourceRanges: []string{"10.0.0.0/8"}},
+	}
+	if got, err := sourceRanges(svc); err != nil || got != "10.0.0.0/8" {
+		t.Errorf("spec set: got %q, %v", got, err)
+	}
+	svc.Spec.LoadBalancerSourceRanges = nil
+	if got, err := sourceRanges(svc); err != nil || got != "192.168.0.0/16" {
+		t.Errorf("annotation only: got %q, %v", got, err)
+	}
+	// A valid spec is not poisoned by a blank annotation.
+	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8"}
+	svc.Annotations[annotationSourceRanges] = ","
+	if got, err := sourceRanges(svc); err != nil || got != "10.0.0.0/8" {
+		t.Errorf("spec with blank annotation: got %q, %v", got, err)
 	}
 }

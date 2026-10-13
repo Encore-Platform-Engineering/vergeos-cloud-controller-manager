@@ -415,9 +415,11 @@ func validateService(svc *v1.Service) error {
 
 // sourceRanges returns the Service's allowed client CIDRs as the canonical,
 // sorted, comma-separated value for a rule's source_ip, or "" for
-// unrestricted. spec.loadBalancerSourceRanges wins over the annotation. Any
-// invalid or non-IPv4 entry is an error: the LB must never end up open to
-// everyone because a restriction could not be applied.
+// unrestricted (no ranges set, or 0.0.0.0/0). spec.loadBalancerSourceRanges
+// wins over the annotation. The LB must never end up open to everyone because
+// a restriction could not be applied, so: a set-but-blank list, a malformed
+// entry, or a list with only IPv6 entries is an error. IPv6 entries in a
+// dual-stack list are dropped (logged) as long as an IPv4 entry remains.
 func sourceRanges(svc *v1.Service) (string, error) {
 	raw := svc.Spec.LoadBalancerSourceRanges
 	if len(raw) == 0 {
@@ -425,17 +427,26 @@ func sourceRanges(svc *v1.Service) (string, error) {
 			raw = strings.Split(ann, ",")
 		}
 	}
+	if len(raw) == 0 {
+		return "", nil
+	}
 	seen := map[string]bool{}
-	var out []string
+	var out, v6 []string
 	allowAll := false
+	entries := 0
 	for _, s := range raw {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
 		}
+		entries++
 		_, n, err := net.ParseCIDR(s)
-		if err != nil || n.IP.To4() == nil || strings.Contains(s, ":") {
-			return "", fmt.Errorf("service %s/%s: invalid loadBalancerSourceRanges entry %q (want an IPv4 CIDR)", svc.Namespace, svc.Name, s)
+		if err != nil {
+			return "", fmt.Errorf("service %s/%s: invalid loadBalancerSourceRanges entry %q (want a CIDR)", svc.Namespace, svc.Name, s)
+		}
+		if strings.Contains(s, ":") || n.IP.To4() == nil {
+			v6 = append(v6, s)
+			continue
 		}
 		if ones, _ := n.Mask.Size(); ones == 0 {
 			allowAll = true // 0.0.0.0/0 allows everyone, same as no restriction
@@ -444,6 +455,15 @@ func sourceRanges(svc *v1.Service) (string, error) {
 			seen[c] = true
 			out = append(out, c)
 		}
+	}
+	if entries == 0 {
+		return "", fmt.Errorf("service %s/%s: loadBalancerSourceRanges is set but contains no CIDRs", svc.Namespace, svc.Name)
+	}
+	if len(out) == 0 {
+		return "", fmt.Errorf("service %s/%s: loadBalancerSourceRanges has only IPv6 entries %v; the VergeOS load balancer supports IPv4 ranges only", svc.Namespace, svc.Name, v6)
+	}
+	if len(v6) > 0 {
+		klog.Warningf("Service %s/%s: ignoring IPv6 loadBalancerSourceRanges %v (IPv4 only)", svc.Namespace, svc.Name, v6)
 	}
 	if allowAll {
 		return "", nil
