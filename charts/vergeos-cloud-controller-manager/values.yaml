@@ -32,6 +32,12 @@ loadBalancer:
   enabled: false
   networkID: 0
   ipPool: []
+  # Opt-in rules for clients on the LB vnet or routed from another vnet (see README
+  # "Reachability"). sourceNATTarget adds an outgoing translate (SNAT) rule per port
+  # with this target (e.g. the vnet's router IP); acceptRules adds an incoming accept
+  # rule per port for vnets whose firewall drops unmatched traffic.
+  sourceNATTarget: ""
+  acceptRules: false
 
 replicaCount: 1
 
