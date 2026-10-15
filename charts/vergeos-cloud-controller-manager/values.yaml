@@ -18,6 +18,24 @@ vergeos:
   caBundle: ""
   caSecret: ""
 
+# Out-of-cluster mode: run the CCM in a management cluster (e.g. next to a
+# k0smotron hosted control plane) so the VergeOS API key never exists in the
+# workload (tenant) cluster. The CCM reaches the workload cluster through a
+# kubeconfig Secret in the release namespace, e.g. the CAPI/k0smotron
+# `<cluster>-kubeconfig` Secret (key `value`).
+# When enabled: hostNetwork=false, dnsPolicy=ClusterFirst, no tolerations and no
+# mounted ServiceAccount token (hostNetwork, dnsPolicy and tolerations are
+# ignored), and no ServiceAccount/ClusterRole/Role is rendered. RBAC is whatever
+# the kubeconfig's identity has in the workload cluster.
+external:
+  enabled: false
+  kubeconfigSecret: ""
+  kubeconfigSecretKey: value
+
+# Extra command-line arguments for the CCM, e.g. ["--cluster-name=tenant-a"].
+# Set a unique --cluster-name per workload cluster when several share one VNet.
+extraArgs: []
+
 # Extra container env, volumes and mounts (standard k8s syntax).
 extraEnv: []
 extraVolumes: []

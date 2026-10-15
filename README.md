@@ -121,6 +121,10 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `vergeos.verifySSL` | `"true"` | TLS certificate verification. `"false"` disables it (the CCM logs a warning) — prefer `caBundle`/`caSecret` |
 | `vergeos.caBundle` | `""` | Inline PEM CA to trust for the VergeOS API (private/self-signed CA) |
 | `vergeos.caSecret` | `""` | Existing Secret (key `ca.crt`) with the CA to trust; alternative to `caBundle` |
+| `external.enabled` | `false` | Run the CCM outside the workload cluster (see [Running outside the workload cluster](#running-outside-the-workload-cluster)). Forces `hostNetwork: false`, `dnsPolicy: ClusterFirst`, no tolerations, no mounted ServiceAccount token and renders no ServiceAccount/RBAC |
+| `external.kubeconfigSecret` | `""` | Secret in the release namespace with the workload cluster kubeconfig (e.g. CAPI/k0smotron `<cluster>-kubeconfig`); required when `external.enabled` |
+| `external.kubeconfigSecretKey` | `value` | Key of that Secret holding the kubeconfig (`value` is the CAPI/k0smotron key) |
+| `extraArgs` | `[]` | Extra CCM command-line arguments, e.g. `["--cluster-name=tenant-a"]` |
 | `extraEnv` / `extraVolumes` / `extraVolumeMounts` | `[]` | Extra container env, volumes and mounts |
 | `vergeos.existingSecret` | `""` | Use an existing Secret for credentials |
 | `nodeNetworkID` | `0` | Only use NIC DHCP leases on this vnet ID for node InternalIPs (0 = all NICs); guest-agent IPs are only used for NICs on that vnet (matched by MAC) |
@@ -144,6 +148,38 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 ### RBAC
 
 Least privilege: the CCM ServiceAccount has cluster-wide `get/list/watch` on nodes and services plus `tokenreviews`/`subjectaccessreviews` create. In `kube-system` only: leases (`get/create/update`), events, the `extension-apiserver-authentication` ConfigMap, ServiceAccount `create`, and `get` + `serviceaccounts/token create` limited to `node-controller`, `service-controller` and `route-controller`. Those three ServiceAccounts (`--use-service-account-credentials`) get their write permissions from Kubernetes' built-in `system:controller:*` roles.
+
+### Running outside the workload cluster
+
+By default the CCM runs inside the cluster it manages, so the VergeOS API key is a Secret in that cluster. On multi-tenant hosted control planes (e.g. k0smotron) tenant cluster-admins can read it, and the key can change anything VergeOS lets it (including other tenants' vnets). With `external.enabled` the CCM runs in the **management cluster** next to the hosted control plane and reaches the workload cluster through its kubeconfig, so the workload cluster never holds a VergeOS Secret:
+
+```bash
+helm upgrade --install vergeos-ccm ./charts/vergeos-cloud-controller-manager \
+  --namespace tenant-a-system \
+  --set vergeos.host=https://vergeos.example.com \
+  --set vergeos.existingSecret=vergeos-credentials \
+  --set external.enabled=true \
+  --set external.kubeconfigSecret=tenant-a-kubeconfig \
+  --set 'extraArgs={--cluster-name=tenant-a}'
+```
+
+Install it with the management cluster's kubeconfig, in the namespace holding the `<cluster>-kubeconfig` Secret (the Secret is mounted, so it must be in the release namespace). Notes:
+
+- The kubeconfig is passed as `--kubeconfig`, `--authentication-kubeconfig` and `--authorization-kubeconfig`; node/service informers, leader election (a `Lease` in the workload cluster's `kube-system`) and the per-controller ServiceAccounts (`--use-service-account-credentials`) all use it. The chart renders no ServiceAccount, ClusterRole or Role in this mode; RBAC is whatever the kubeconfig's identity has in the workload cluster (the CAPI/k0smotron admin kubeconfig is sufficient; a restricted identity needs at least the permissions in [RBAC](#rbac) plus the rights to create the controller ServiceAccounts and their tokens).
+- Mode defaults: `hostNetwork: false`, `dnsPolicy: ClusterFirst`, no tolerations, `automountServiceAccountToken: false`. `hostNetwork`, `dnsPolicy` and `tolerations` values are ignored. `nodeSelector`, `affinity`, `priorityClassName` and `resources` still apply. Nodes are initialized over the kubeconfig, so the CNI does not need to be up.
+- The management cluster pod must reach both the workload API server address in the kubeconfig and the VergeOS API.
+- Set a unique `--cluster-name` per workload cluster through `extraArgs`: it is part of the load balancer ownership, so clusters sharing one VNet must not use the same name (default `kubernetes`). Changing it later orphans existing rules.
+- Install one release per workload cluster (each in its own namespace or with its own release name).
+- The kubeconfig is read at startup; restart the Deployment after it rotates.
+
+**VergeOS permissions the API key needs** (scope the key to what the CCM does; it only touches its configured VMs and vnet):
+
+| Area | Operations |
+|------|------------|
+| VMs / machines | list and get VMs; list NICs (with DHCP leases) and read machine status (node metadata, provider ID, InternalIPs, power state) |
+| VNet `loadBalancer.networkID` (only if LB enabled) | read the vnet; list, create, update, delete addresses (`ipalias`) and rules (NAT/translate) |
+
+Whether VergeOS can restrict a key to a single vnet has not been verified; until it is, a leaked key is still broader than the CCM's own footprint, but it no longer sits in the tenant cluster.
 
 ### VergeOS Credentials
 
