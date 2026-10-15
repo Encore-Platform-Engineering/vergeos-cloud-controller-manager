@@ -107,7 +107,7 @@ func TestNewCloud_WiresClientsAndConfig(t *testing.T) {
 	if c.instances.nodeNetworkID != 7 {
 		t.Errorf("nodeNetworkID = %d, want 7", c.instances.nodeNetworkID)
 	}
-	if c.lb == nil || c.lb.rules == nil || c.lb.network == nil || c.lb.addrs == nil {
+	if c.lb == nil || c.lb.rules == nil || c.lb.network == nil || c.lb.addrs == nil || c.lb.nodes == nil {
 		t.Errorf("load balancer must have all clients wired: %+v", c.lb)
 	}
 }

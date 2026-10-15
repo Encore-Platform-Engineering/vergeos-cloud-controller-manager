@@ -38,7 +38,7 @@ func newCloud(config io.Reader) (*cloud, error) {
 		instances: newInstances(client.VMs, client.MachineStatus, client.VMNICs, cfg.NodeNetworkID),
 	}
 	if cfg.LoadBalancer.Enabled {
-		c.lb = newLoadBalancer(client.VNetRules, client.Networks, client.VNetAddresses, cfg.LoadBalancer)
+		c.lb = newLoadBalancer(client.VNetRules, client.Networks, client.VNetAddresses, c.instances, cfg.LoadBalancer)
 	}
 
 	return c, nil
