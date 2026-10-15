@@ -32,6 +32,13 @@ loadBalancer:
   enabled: false
   networkID: 0
   ipPool: []
+  # Extra vnets a Service can select with the annotation
+  # loadbalancer.vergeos.io/network-id. Only the vnets listed here (and
+  # networkID above) are selectable. Example:
+  # additionalNetworks:
+  #   - networkID: 6
+  #     ipPool: ["10.6.0.100", "10.6.0.101"]
+  additionalNetworks: []
 
 replicaCount: 1
 

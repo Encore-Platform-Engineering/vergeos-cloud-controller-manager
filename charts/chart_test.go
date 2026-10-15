@@ -141,6 +141,24 @@ func TestLoadBalancerEnabledRequiresNetworkAndPool(t *testing.T) {
 	}
 }
 
+func TestLoadBalancerAdditionalNetworks(t *testing.T) {
+	base := []string{"--set", "loadBalancer.enabled=true", "--set", "loadBalancer.networkID=5", "--set", "loadBalancer.ipPool[0]=10.5.0.5"}
+	with := func(extra ...string) []string { return append(append([]string{}, base...), extra...) }
+
+	if _, err := helmTemplate(t, with("--set", "loadBalancer.additionalNetworks[0].ipPool[0]=10.6.0.5")...); err == nil {
+		t.Error("expected render failure for an additional network without networkID")
+	}
+	if _, err := helmTemplate(t, with("--set", "loadBalancer.additionalNetworks[0].networkID=6")...); err == nil {
+		t.Error("expected render failure for an additional network without ipPool")
+	}
+	r := mustRender(t, with("--set", "loadBalancer.additionalNetworks[0].networkID=6", "--set", "loadBalancer.additionalNetworks[0].ipPool[0]=10.6.0.5")...)
+	lb := r.cloudConfig["loadBalancer"].(map[string]any)
+	extra, _ := lb["additionalNetworks"].([]any)
+	if len(extra) != 1 || extra[0].(map[string]any)["networkID"] != float64(6) {
+		t.Errorf("additionalNetworks = %v", lb["additionalNetworks"])
+	}
+}
+
 // #10
 func TestSchedulingWorksOnWorkerOnlyAndTaintedClusters(t *testing.T) {
 	spec := mustRender(t).deployment.Spec.Template.Spec
