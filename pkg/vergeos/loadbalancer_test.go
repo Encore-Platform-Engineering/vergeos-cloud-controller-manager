@@ -1082,8 +1082,54 @@ func TestOwnedRuleOrderIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestEnsure_AppliesWhenVNetNeedsFWApply(t *testing.T) {
+func TestEnsure_DoesNotApplyForeignStagedChangesByDefault(t *testing.T) {
 	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	applies := f.applies
+
+	// Someone else staged a firewall change; we changed nothing.
+	f.needFW = true
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if f.applies != applies || !f.needFW {
+		t.Fatalf("foreign staged change must stay staged: applies %d->%d needFW=%v", applies, f.applies, f.needFW)
+	}
+	// Same for Update and Delete of a Service with nothing left to change.
+	if err := lb.UpdateLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err != nil {
+		t.Fatal(err)
+	}
+	other := testService("default", "gone", []v1.ServicePort{tcp(80, 30081)})
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", other); err != nil {
+		t.Fatal(err)
+	}
+	if f.applies != applies {
+		t.Fatalf("apply issued without own changes: %d -> %d", applies, f.applies)
+	}
+
+	// Our own change still applies (and that necessarily activates the staged edit).
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.2"))
+	if f.applies != applies+1 {
+		t.Errorf("own change must be applied, applies=%d", f.applies)
+	}
+}
+
+func TestEnsure_OwnFailedApplyIsStillRetriedByDefault(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	f.failApply = errors.New("apply down")
+	if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Fatal("expected apply failure")
+	}
+	f.failApply = nil
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if f.applies != 1 {
+		t.Errorf("failed own apply must be retried without a diff, applies=%d", f.applies)
+	}
+}
+
+func TestEnsure_AppliesStagedChangesWhenOptedIn(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	lb.config.ApplyStagedChanges = true
 	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
 	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
 	applies := f.applies
@@ -1098,7 +1144,7 @@ func TestEnsure_AppliesWhenVNetNeedsFWApply(t *testing.T) {
 	lb2 := newLoadBalancer(fakeRules{f}, fakeNet{f}, fakeAddrs{f}, lb.config)
 	mustEnsure(t, lb2, "c", svc, testNodes("10.0.1.1"))
 	if f.applies != applies+1 {
-		t.Errorf("need_fw_apply must trigger an apply, applies=%d", f.applies)
+		t.Errorf("need_fw_apply must trigger an apply when opted in, applies=%d", f.applies)
 	}
 }
 

@@ -56,6 +56,11 @@ questions:
         description: "Optional: add an incoming accept rule per Service port for vnets whose firewall drops traffic no rule accepts"
         type: boolean
         default: false
+      - variable: loadBalancer.applyStagedChanges
+        label: Apply Staged Firewall Changes
+        description: "Also apply the vnet's staged firewall changes that the CCM did not make (recovers from a crash between write and apply, but activates other people's pending edits). Off = only apply the CCM's own changes"
+        type: boolean
+        default: false
 
   - variable: imagePullSecrets[0].name
     label: Image Pull Secret
