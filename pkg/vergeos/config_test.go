@@ -10,7 +10,7 @@ func TestParseConfig_Valid(t *testing.T) {
 		"loadBalancer": {
 			"enabled": true,
 			"networkID": 5,
-			"ipPool": ["10.8.8.100", "10.8.8.101"]
+			"ipPool": ["192.0.2.100", "192.0.2.101"]
 		}
 	}`
 
@@ -27,8 +27,8 @@ func TestParseConfig_Valid(t *testing.T) {
 	if len(cfg.LoadBalancer.IPPool) != 2 {
 		t.Errorf("expected 2 IPs in pool, got %d", len(cfg.LoadBalancer.IPPool))
 	}
-	if cfg.LoadBalancer.IPPool[0] != "10.8.8.100" {
-		t.Errorf("expected first IP=10.8.8.100, got %s", cfg.LoadBalancer.IPPool[0])
+	if cfg.LoadBalancer.IPPool[0] != "192.0.2.100" {
+		t.Errorf("expected first IP=192.0.2.100, got %s", cfg.LoadBalancer.IPPool[0])
 	}
 }
 
@@ -63,7 +63,7 @@ func TestParseConfig_LBEnabledMissingNetworkID(t *testing.T) {
 	input := `{
 		"loadBalancer": {
 			"enabled": true,
-			"ipPool": ["10.8.8.100"]
+			"ipPool": ["192.0.2.100"]
 		}
 	}`
 	_, err := parseConfig(strings.NewReader(input))
@@ -132,15 +132,15 @@ func TestParseConfig_IPPoolValidation(t *testing.T) {
 }
 
 func TestParseConfig_SourceNATAndAccept(t *testing.T) {
-	cfg, err := parseConfig(strings.NewReader(`{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":["10.8.8.100"],"sourceNATTarget":"10.8.8.1","acceptRules":true}}`))
+	cfg, err := parseConfig(strings.NewReader(`{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":["192.0.2.100"],"sourceNATTarget":"192.0.2.1","acceptRules":true}}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.LoadBalancer.SourceNATTarget != "10.8.8.1" || !cfg.LoadBalancer.AcceptRules {
+	if cfg.LoadBalancer.SourceNATTarget != "192.0.2.1" || !cfg.LoadBalancer.AcceptRules {
 		t.Errorf("sourceNATTarget/acceptRules not parsed: %+v", cfg.LoadBalancer)
 	}
 	for _, bad := range []string{`"a b"`, `"x\"y"`, `"1.2.3.4;"`} {
-		in := `{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":["10.8.8.100"],"sourceNATTarget":` + bad + `}}`
+		in := `{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":["192.0.2.100"],"sourceNATTarget":` + bad + `}}`
 		if _, err := parseConfig(strings.NewReader(in)); err == nil {
 			t.Errorf("sourceNATTarget %s: expected error", bad)
 		}
