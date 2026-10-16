@@ -19,9 +19,26 @@ type cloudConfig struct {
 }
 
 type lbConfig struct {
-	Enabled   bool     `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// NetworkID and IPPool are the default vnet and pool, used by Services
+	// without the loadbalancer.vergeos.io/network-id annotation.
 	NetworkID int      `json:"networkID"`
 	IPPool    []string `json:"ipPool"`
+	// AdditionalNetworks are the other vnets a Service may select with the
+	// network-id annotation. Only vnets listed here (or the default) can be
+	// selected, so Service authors cannot place an LB on an arbitrary vnet.
+	AdditionalNetworks []lbNetworkConfig `json:"additionalNetworks"`
+}
+
+// lbNetworkConfig is one selectable LoadBalancer vnet and its IP pool.
+type lbNetworkConfig struct {
+	NetworkID int      `json:"networkID"`
+	IPPool    []string `json:"ipPool"`
+}
+
+// networks returns the per-vnet configuration, default vnet first.
+func (c lbConfig) networks() []lbNetworkConfig {
+	return append([]lbNetworkConfig{{NetworkID: c.NetworkID, IPPool: c.IPPool}}, c.AdditionalNetworks...)
 }
 
 func parseConfig(r io.Reader) (*cloudConfig, error) {
@@ -50,6 +67,25 @@ func parseConfig(r io.Reader) (*cloudConfig, error) {
 			return nil, err
 		}
 		cfg.LoadBalancer.IPPool = pool
+
+		seen := map[int]bool{cfg.LoadBalancer.NetworkID: true}
+		for i, n := range cfg.LoadBalancer.AdditionalNetworks {
+			if n.NetworkID <= 0 {
+				return nil, fmt.Errorf("loadBalancer.additionalNetworks[%d].networkID must be > 0", i)
+			}
+			if seen[n.NetworkID] {
+				return nil, fmt.Errorf("loadBalancer.additionalNetworks[%d]: networkID %d is already configured", i, n.NetworkID)
+			}
+			seen[n.NetworkID] = true
+			if len(n.IPPool) == 0 {
+				return nil, fmt.Errorf("loadBalancer.additionalNetworks[%d].ipPool must contain at least one IP", i)
+			}
+			pool, err := validateIPPool(n.IPPool)
+			if err != nil {
+				return nil, fmt.Errorf("loadBalancer.additionalNetworks[%d]: %w", i, err)
+			}
+			cfg.LoadBalancer.AdditionalNetworks[i].IPPool = pool
+		}
 	}
 
 	return cfg, nil
