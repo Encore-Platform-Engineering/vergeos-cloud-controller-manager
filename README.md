@@ -116,7 +116,7 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `image.repository` | `ghcr.io/encore-platform-engineering/vergeos-cloud-controller-manager` | Container image |
 | `image.tag` | `""` | Image tag; empty = `v` + chart `appVersion` (CI publishes on git tags `v*`) |
 | `imagePullSecrets` | `[]` | Image pull secrets for private registries |
-| `vergeos.host` | `""` | VergeOS API host (e.g., `10.8.8.26`) |
+| `vergeos.host` | `""` | VergeOS API host (e.g., `vergeos.example.net`) |
 | `vergeos.apiKey` | `""` | API key authentication |
 | `vergeos.verifySSL` | `"true"` | TLS certificate verification. `"false"` disables it (the CCM logs a warning) — prefer `caBundle`/`caSecret` |
 | `vergeos.caBundle` | `""` | Inline PEM CA to trust for the VergeOS API (private/self-signed CA) |
@@ -151,7 +151,7 @@ Credentials are provided via environment variables (injected from a Kubernetes S
 
 | Variable | Description |
 |----------|-------------|
-| `VERGEOS_HOST` | VergeOS API host (e.g., `10.8.8.26`) |
+| `VERGEOS_HOST` | VergeOS API host (e.g., `vergeos.example.net`) |
 | `VERGEOS_API_KEY` | API key for authentication |
 | `VERGEOS_VERIFY_SSL` | Verify TLS certificates (`true`/`false`, default: `true`). `false` disables verification and logs a warning. |
 | `VERGEOS_CA_FILE` | PEM file with extra CA certificates to trust (same as `caFile` in the cloud config). |

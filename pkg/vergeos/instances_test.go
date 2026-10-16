@@ -335,7 +335,7 @@ func TestInstanceShutdown_Stopped(t *testing.T) {
 // leaseNICs returns one NIC with a DHCP lease, for tests about everything but addresses.
 func leaseNICs() *mockNICClient {
 	return &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
-		return []vergeos.VMNIC{{ID: 1, VNET: 10, MAC: "52:54:00:00:00:01", IPAddress: "10.1.101.50"}}, nil
+		return []vergeos.VMNIC{{ID: 1, VNET: 10, MAC: "52:54:00:00:00:01", IPAddress: "192.0.2.50"}}, nil
 	}}
 }
 
@@ -455,7 +455,7 @@ func TestInstanceMetadata_NonVergeOSProviderID(t *testing.T) {
 						Network: []vergeos.GuestNetworkInterface{
 							{
 								Name:        "ens1",
-								IPAddresses: []vergeos.GuestIPAddress{{Type: "ipv4", Address: "10.8.8.50"}},
+								IPAddresses: []vergeos.GuestIPAddress{{Type: "ipv4", Address: "192.0.2.50"}},
 							},
 						},
 					},
@@ -682,10 +682,10 @@ func TestInstanceMetadata_NICLeaseFallback(t *testing.T) {
 			// Deliberately unsorted; lowest $key must come first.
 			return []vergeos.VMNIC{
 				{ID: 9, VNET: 20, IPAddress: "10.9.0.5"},
-				{ID: 3, VNET: 10, IPAddress: "10.1.101.50"},
+				{ID: 3, VNET: 10, IPAddress: "192.0.2.50"},
 				{ID: 5, VNET: 10, IPAddress: ""},
 				{ID: 6, VNET: 10, IPAddress: "169.254.1.1"},
-				{ID: 7, VNET: 10, IPAddress: "10.1.101.50"},
+				{ID: 7, VNET: 10, IPAddress: "192.0.2.50"},
 			}, nil
 		}},
 	}
@@ -695,7 +695,7 @@ func TestInstanceMetadata_NICLeaseFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []v1.NodeAddress{
-		{Type: v1.NodeInternalIP, Address: "10.1.101.50"},
+		{Type: v1.NodeInternalIP, Address: "192.0.2.50"},
 		{Type: v1.NodeInternalIP, Address: "10.9.0.5"},
 		{Type: v1.NodeHostName, Address: "ns-machine"},
 	}
@@ -711,14 +711,14 @@ func TestInstanceMetadata_NICLeaseFallback_NoAgentClientAtAll(t *testing.T) {
 	i := &instances{
 		vms: metaVM(),
 		nics: &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
-			return []vergeos.VMNIC{{ID: 1, IPAddress: "10.1.101.50"}}, nil
+			return []vergeos.VMNIC{{ID: 1, IPAddress: "192.0.2.50"}}, nil
 		}},
 	}
 	meta, err := i.InstanceMetadata(context.Background(), testNode("ns-machine", "vergeos://42"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.NodeAddresses[0] != (v1.NodeAddress{Type: v1.NodeInternalIP, Address: "10.1.101.50"}) {
+	if meta.NodeAddresses[0] != (v1.NodeAddress{Type: v1.NodeInternalIP, Address: "192.0.2.50"}) {
 		t.Errorf("got %v", meta.NodeAddresses)
 	}
 }
@@ -731,7 +731,7 @@ func TestInstanceMetadata_NICLeaseFallback_VNetFilter(t *testing.T) {
 		nics: &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
 			return []vergeos.VMNIC{
 				{ID: 1, VNET: 20, IPAddress: "10.9.0.5"},
-				{ID: 2, VNET: 10, IPAddress: "10.1.101.50"},
+				{ID: 2, VNET: 10, IPAddress: "192.0.2.50"},
 			}, nil
 		}},
 	}
@@ -739,7 +739,7 @@ func TestInstanceMetadata_NICLeaseFallback_VNetFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(meta.NodeAddresses) != 2 || meta.NodeAddresses[0].Address != "10.1.101.50" {
+	if len(meta.NodeAddresses) != 2 || meta.NodeAddresses[0].Address != "192.0.2.50" {
 		t.Errorf("expected only vnet 10 lease + hostname, got %v", meta.NodeAddresses)
 	}
 }
@@ -757,7 +757,7 @@ func TestInstanceMetadata_LeasesWinOverAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(meta.NodeAddresses) != 2 || meta.NodeAddresses[0].Address != "10.1.101.50" {
+	if len(meta.NodeAddresses) != 2 || meta.NodeAddresses[0].Address != "192.0.2.50" {
 		t.Errorf("got %v", meta.NodeAddresses)
 	}
 }
@@ -787,7 +787,7 @@ func TestInstanceMetadata_AgentSkipsVirtualInterfaces(t *testing.T) {
 			vergeos.GuestNetworkInterface{Name: "kube-bridge", HardwareAddress: "aa:aa:aa:aa:aa:04", IPAddresses: v4("10.99.0.1")},
 			// Even if a virtual iface shares a NIC's MAC (bridge enslaving eth0), skip it.
 			vergeos.GuestNetworkInterface{Name: "br0", HardwareAddress: "52:54:00:00:00:01", IPAddresses: v4("10.77.0.1")},
-			vergeos.GuestNetworkInterface{Name: "eth0", HardwareAddress: "52:54:00:00:00:01", IPAddresses: append(v4("10.1.101.60"), vergeos.GuestIPAddress{Type: "ipv4", Address: "169.254.1.2"})},
+			vergeos.GuestNetworkInterface{Name: "eth0", HardwareAddress: "52:54:00:00:00:01", IPAddresses: append(v4("192.0.2.60"), vergeos.GuestIPAddress{Type: "ipv4", Address: "169.254.1.2"})},
 		),
 		nics: &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
 			return []vergeos.VMNIC{{ID: 1, VNET: 10, MAC: mac}}, nil // no lease yet
@@ -798,7 +798,7 @@ func TestInstanceMetadata_AgentSkipsVirtualInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []v1.NodeAddress{
-		{Type: v1.NodeInternalIP, Address: "10.1.101.60"},
+		{Type: v1.NodeInternalIP, Address: "192.0.2.60"},
 		{Type: v1.NodeHostName, Address: "ns-machine"},
 	}
 	if !reflect.DeepEqual(meta.NodeAddresses, want) {
@@ -815,7 +815,7 @@ func TestInstanceMetadata_AgentHonoursNodeNetworkID(t *testing.T) {
 		machineStatus: agentWith(
 			vergeos.GuestNetworkInterface{Name: "eth1", HardwareAddress: "52:54:00:00:00:02", IPAddresses: v4("10.9.0.5")},
 			vergeos.GuestNetworkInterface{Name: "eth2", HardwareAddress: "de:ad:be:ef:00:01", IPAddresses: v4("192.168.5.5")},
-			vergeos.GuestNetworkInterface{Name: "eth0", HardwareAddress: "52:54:00:00:00:01", IPAddresses: v4("10.1.101.60")},
+			vergeos.GuestNetworkInterface{Name: "eth0", HardwareAddress: "52:54:00:00:00:01", IPAddresses: v4("192.0.2.60")},
 		),
 		nics: &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
 			return []vergeos.VMNIC{
@@ -828,7 +828,7 @@ func TestInstanceMetadata_AgentHonoursNodeNetworkID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(meta.NodeAddresses) != 2 || meta.NodeAddresses[0].Address != "10.1.101.60" {
+	if len(meta.NodeAddresses) != 2 || meta.NodeAddresses[0].Address != "192.0.2.60" {
 		t.Errorf("expected only the vnet-10 NIC's agent IP, got %v", meta.NodeAddresses)
 	}
 }
@@ -868,14 +868,14 @@ func TestInstanceMetadata_AgentErrorFallsBackToNICs(t *testing.T) {
 			return nil, fmt.Errorf("boom")
 		}},
 		nics: &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
-			return []vergeos.VMNIC{{ID: 1, IPAddress: "10.1.101.50"}}, nil
+			return []vergeos.VMNIC{{ID: 1, IPAddress: "192.0.2.50"}}, nil
 		}},
 	}
 	meta, err := i.InstanceMetadata(context.Background(), testNode("ns-machine", "vergeos://42"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.NodeAddresses[0].Address != "10.1.101.50" {
+	if meta.NodeAddresses[0].Address != "192.0.2.50" {
 		t.Errorf("got %v", meta.NodeAddresses)
 	}
 }
