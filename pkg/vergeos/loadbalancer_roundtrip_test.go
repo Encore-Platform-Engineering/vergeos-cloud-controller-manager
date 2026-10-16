@@ -203,9 +203,9 @@ func lbRoundTripCloud(t *testing.T) (*cloud, *lbAPIFake, []*v1.Node) {
 			{"$key": 2, "uuid": "11111111-2222-3333-4444-555555555555", "name": "node-b", "machine": 102},
 		},
 		nics: []map[string]any{
-			{"$key": 1, "machine": 101, "vnet": 10, "macaddress": "52:54:00:00:00:01", "ipaddress": "10.1.0.1"},
+			{"$key": 1, "machine": 101, "vnet": 10, "macaddress": "52:54:00:00:00:01", "ipaddress": "198.51.100.1"},
 			{"$key": 2, "machine": 101, "vnet": 5, "macaddress": "52:54:00:00:00:02", "ipaddress": "10.5.0.11"},
-			{"$key": 3, "machine": 102, "vnet": 10, "macaddress": "52:54:00:00:01:01", "ipaddress": "10.1.0.2"},
+			{"$key": 3, "machine": 102, "vnet": 10, "macaddress": "52:54:00:00:01:01", "ipaddress": "198.51.100.2"},
 			{"$key": 4, "machine": 102, "vnet": 5, "macaddress": "52:54:00:00:01:02", "ipaddress": "10.5.0.12"},
 		},
 	}
@@ -217,7 +217,7 @@ func lbRoundTripCloud(t *testing.T) (*cloud, *lbAPIFake, []*v1.Node) {
 		t.Fatal(err)
 	}
 	nodes := []*v1.Node{nodeNamed("node-b"), nodeNamed("node-a")}
-	for i, ip := range []string{"10.1.0.2", "10.1.0.1"} {
+	for i, ip := range []string{"198.51.100.2", "198.51.100.1"} {
 		nodes[i].Status.Addresses = []v1.NodeAddress{{Type: v1.NodeInternalIP, Address: ip}}
 	}
 	return c, fake, nodes
@@ -308,8 +308,8 @@ func TestLoadBalancer_RoundTripNoNodeOnLBVnet(t *testing.T) {
 	c, fake, nodes := lbRoundTripCloud(t)
 	fake.mu.Lock()
 	fake.nics = []map[string]any{ // vnet-10 NICs only
-		{"$key": 1, "machine": 101, "vnet": 10, "macaddress": "52:54:00:00:00:01", "ipaddress": "10.1.0.1"},
-		{"$key": 3, "machine": 102, "vnet": 10, "macaddress": "52:54:00:00:01:01", "ipaddress": "10.1.0.2"},
+		{"$key": 1, "machine": 101, "vnet": 10, "macaddress": "52:54:00:00:00:01", "ipaddress": "198.51.100.1"},
+		{"$key": 3, "machine": 102, "vnet": 10, "macaddress": "52:54:00:00:01:01", "ipaddress": "198.51.100.2"},
 	}
 	fake.mu.Unlock()
 

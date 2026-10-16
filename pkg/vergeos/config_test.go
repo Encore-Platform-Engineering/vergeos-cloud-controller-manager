@@ -10,7 +10,7 @@ func TestParseConfig_Valid(t *testing.T) {
 		"loadBalancer": {
 			"enabled": true,
 			"networkID": 5,
-			"ipPool": ["10.8.8.100", "10.8.8.101"]
+			"ipPool": ["192.0.2.100", "192.0.2.101"]
 		}
 	}`
 
@@ -27,8 +27,8 @@ func TestParseConfig_Valid(t *testing.T) {
 	if len(cfg.LoadBalancer.IPPool) != 2 {
 		t.Errorf("expected 2 IPs in pool, got %d", len(cfg.LoadBalancer.IPPool))
 	}
-	if cfg.LoadBalancer.IPPool[0] != "10.8.8.100" {
-		t.Errorf("expected first IP=10.8.8.100, got %s", cfg.LoadBalancer.IPPool[0])
+	if cfg.LoadBalancer.IPPool[0] != "192.0.2.100" {
+		t.Errorf("expected first IP=192.0.2.100, got %s", cfg.LoadBalancer.IPPool[0])
 	}
 }
 
@@ -63,7 +63,7 @@ func TestParseConfig_LBEnabledMissingNetworkID(t *testing.T) {
 	input := `{
 		"loadBalancer": {
 			"enabled": true,
-			"ipPool": ["10.8.8.100"]
+			"ipPool": ["192.0.2.100"]
 		}
 	}`
 	_, err := parseConfig(strings.NewReader(input))
