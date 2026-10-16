@@ -63,7 +63,12 @@ func (r fakeRules) Create(ctx context.Context, req *vergeos.VNetRuleCreateReques
 		Key: r.f.key(), VNet: vergeos.FlexInt(req.VNet), Name: req.Name, Description: req.Description,
 		Enabled: *req.Enabled, Protocol: *req.Protocol, Direction: *req.Direction, Action: *req.Action,
 		DestinationIP: *req.DestinationIP, DestinationPorts: *req.DestinationPorts,
-		TargetIP: *req.TargetIP, TargetPorts: *req.TargetPorts,
+	}
+	if req.TargetIP != nil {
+		rule.TargetIP = *req.TargetIP
+	}
+	if req.TargetPorts != nil {
+		rule.TargetPorts = *req.TargetPorts
 	}
 	if req.SourceIP != nil {
 		rule.SourceIP = *req.SourceIP
@@ -1336,5 +1341,100 @@ func TestSourceRanges_SpecWinsOverAnnotation(t *testing.T) {
 	svc.Annotations[annotationSourceRanges] = ","
 	if got, err := sourceRanges(svc); err != nil || got != "10.0.0.0/8" {
 		t.Errorf("spec with blank annotation: got %q, %v", got, err)
+	}
+}
+
+// --- same-vnet / routed client reachability (#41) ---
+
+func rulesByRole(f *fakeVNet) map[string]vergeos.VNetRule {
+	m := map[string]vergeos.VNetRule{}
+	for _, r := range f.rules {
+		m[ruleKey(r.Direction, r.Action, r.Protocol, r.DestinationPorts)] = r
+	}
+	return m
+}
+
+func TestEnsure_DefaultHasNoSNATOrAcceptRules(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	mustEnsure(t, lb, "c", testService("default", "web", []v1.ServicePort{tcp(80, 30080)}), testNodes("10.0.1.1"))
+	if len(f.rules) != 1 {
+		t.Fatalf("want only the DNAT rule by default, got %+v", f.rules)
+	}
+}
+
+func TestEnsure_SourceNATAndAcceptRules(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	lb.config.SourceNATTarget = "10.0.0.1"
+	lb.config.AcceptRules = true
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080), {Port: 53, NodePort: 30053, Protocol: v1.ProtocolUDP}})
+	svc.Spec.LoadBalancerSourceRanges = []string{"192.168.0.0/16"}
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.2", "10.0.1.1"))
+	if ip != "10.0.0.100" {
+		t.Fatalf("ip = %s", ip)
+	}
+	if len(f.rules) != 6 || f.applies != 1 {
+		t.Fatalf("rules=%d applies=%d, want 6 rules and one apply: %+v", len(f.rules), f.applies, f.rules)
+	}
+	by := rulesByRole(f)
+	owner := newLBOwner("c", svc)
+
+	dnat := by["incoming/translate/tcp/80"]
+	if dnat.DestinationIP != ip || dnat.TargetIP != "10.0.1.1,10.0.1.2" || dnat.TargetPorts != "30080" {
+		t.Errorf("dnat %+v", dnat)
+	}
+	snat := by["outgoing/translate/tcp/30080"]
+	if snat.Name != owner.ruleName("tcp", 80)+"-snat" || snat.Description != owner.String() || !snat.Enabled ||
+		snat.DestinationIP != "10.0.1.1,10.0.1.2" || snat.TargetIP != "10.0.0.1" || snat.SourceIP != "" {
+		t.Errorf("snat %+v", snat)
+	}
+	if u := by["outgoing/translate/udp/30053"]; u.Protocol != "udp" || u.TargetIP != "10.0.0.1" {
+		t.Errorf("udp snat %+v", u)
+	}
+	acc := by["incoming/accept/tcp/80"]
+	if acc.Name != owner.ruleName("tcp", 80)+"-accept" || acc.DestinationIP != ip || acc.SourceIP != "192.168.0.0/16" ||
+		acc.TargetIP != "" || acc.TargetPorts != "" {
+		t.Errorf("accept %+v", acc)
+	}
+
+	// Idempotent: SNAT rules must not be mistaken for the LB IP, and nothing is rewritten.
+	creates, updates, deletes, applies, lists := f.creates, f.updates, f.deletes, f.applies, f.addrLists
+	if ip2 := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.2")); ip2 != ip {
+		t.Fatalf("ip changed to %s", ip2)
+	}
+	if f.creates != creates || f.updates != updates || f.deletes != deletes || f.applies != applies {
+		t.Error("idempotent ensure wrote")
+	}
+	if f.addrLists != lists {
+		t.Error("SNAT rule destinations (node IPs) were treated as moved LB IPs")
+	}
+	if st, found, err := lb.GetLoadBalancer(context.Background(), "c", svc); err != nil || !found || st.Ingress[0].IP != ip {
+		t.Errorf("GetLoadBalancer = %v %v %v", st, found, err)
+	}
+
+	// Node changes are reflected in the SNAT rule destination.
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.3"))
+	if got := rulesByRole(f)["outgoing/translate/tcp/30080"].DestinationIP; got != "10.0.1.1,10.0.1.3" {
+		t.Errorf("snat destination after node change = %q", got)
+	}
+
+	// Turning the options off removes the extra rules (they are owned) and keeps the DNAT rule.
+	lb.config.SourceNATTarget = ""
+	lb.config.AcceptRules = false
+	if mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.3")) != ip {
+		t.Fatal("ip changed")
+	}
+	if len(f.rules) != 2 {
+		t.Fatalf("want 2 DNAT rules left, got %+v", f.rules)
+	}
+
+	// Delete removes every owned rule kind and the alias.
+	lb.config.SourceNATTarget = "10.0.0.1"
+	lb.config.AcceptRules = true
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", svc); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rules) != 0 || f.hasAddr(ip) {
+		t.Errorf("leftovers: rules=%+v addrs=%+v", f.rules, f.addrs)
 	}
 }

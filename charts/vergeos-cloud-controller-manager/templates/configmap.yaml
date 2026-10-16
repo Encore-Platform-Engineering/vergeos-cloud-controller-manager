@@ -25,6 +25,8 @@ data:
       "loadBalancer": {
         "enabled": {{ .Values.loadBalancer.enabled }},
         "networkID": {{ .Values.loadBalancer.networkID | default 0 }},
-        "ipPool": {{ .Values.loadBalancer.ipPool | default list | toJson }}
+        "ipPool": {{ .Values.loadBalancer.ipPool | default list | toJson }},
+        "sourceNATTarget": {{ .Values.loadBalancer.sourceNATTarget | default "" | toJson }},
+        "acceptRules": {{ .Values.loadBalancer.acceptRules | default false }}
       }
     }

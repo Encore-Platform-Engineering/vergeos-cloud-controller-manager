@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strings"
 )
 
@@ -22,6 +23,15 @@ type lbConfig struct {
 	Enabled   bool     `json:"enabled"`
 	NetworkID int      `json:"networkID"`
 	IPPool    []string `json:"ipPool"`
+	// SourceNATTarget, when set, adds one outgoing `translate` (source NAT)
+	// rule per Service port whose target is this value (a VergeOS filter
+	// token or IP such as the LB vnet's router address). It makes the
+	// backend replies return through the LB vnet, which same-vnet (hairpin)
+	// and routed clients need. Empty (default) = no SNAT rules.
+	SourceNATTarget string `json:"sourceNATTarget"`
+	// AcceptRules adds one incoming `accept` rule per Service port for the
+	// LB IP, for vnets whose firewall drops traffic that no rule accepts.
+	AcceptRules bool `json:"acceptRules"`
 }
 
 func parseConfig(r io.Reader) (*cloudConfig, error) {
@@ -51,9 +61,17 @@ func parseConfig(r io.Reader) (*cloudConfig, error) {
 		}
 		cfg.LoadBalancer.IPPool = pool
 	}
+	if t := cfg.LoadBalancer.SourceNATTarget; t != "" && !sourceNATTargetRE.MatchString(t) {
+		return nil, fmt.Errorf("loadBalancer.sourceNATTarget %q must be an IP or a VergeOS filter token (letters, digits and . : / _ - only)", t)
+	}
 
 	return cfg, nil
 }
+
+// sourceNATTargetRE limits sourceNATTarget to characters that can appear in an
+// IP/CIDR or a VergeOS filter token: the value is sent verbatim as a rule's
+// target_ip.
+var sourceNATTargetRE = regexp.MustCompile(`^[A-Za-z0-9._:/-]+$`)
 
 // validateIPPool requires every entry to be a single IPv4 address (no CIDRs,
 // ranges, hostnames, quotes or whitespace) and rejects duplicates. Entries
