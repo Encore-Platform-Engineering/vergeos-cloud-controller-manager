@@ -82,6 +82,21 @@ helm install vergeos-ccm ./charts/vergeos-cloud-controller-manager \
   --set 'loadBalancer.ipPool[1]=10.0.0.101'
 ```
 
+### Install from OCI
+
+Each `v*` tag publishes the chart (version = tag without `v`) to `oci://ghcr.io/encore-platform-engineering/charts`. The package is private, so log in first (a token with `read:packages`):
+
+```bash
+helm registry login ghcr.io -u <GITHUB_USER>
+helm install vergeos-ccm oci://ghcr.io/encore-platform-engineering/charts/vergeos-cloud-controller-manager \
+  --version 0.1.1 --namespace kube-system \
+  --set vergeos.host=<VERGEOS_HOST> \
+  --set vergeos.apiKey=<API_KEY> \
+  --set 'imagePullSecrets[0].name=ghcr-credentials'
+```
+
+`helm template` takes the same arguments.
+
 ### Verify
 
 ```bash
