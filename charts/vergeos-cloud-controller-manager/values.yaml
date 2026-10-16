@@ -8,7 +8,7 @@ imagePullSecrets: []
 # - name: ghcr-credentials
 
 vergeos:
-  # API host or URL (e.g. 10.8.8.26 or https://vergeos.example.com); https:// is assumed if no scheme.
+  # API host or URL (e.g. 192.0.2.10 or https://vergeos.example.net); https:// is assumed if no scheme.
   host: ""
   apiKey: ""
   verifySSL: "true"
