@@ -1390,7 +1390,7 @@ func TestSourceRanges_SpecWinsOverAnnotation(t *testing.T) {
 	}
 }
 
-// --- same-vnet / routed client reachability (#27) ---
+// --- same-vnet / routed client reachability (#41) ---
 
 func rulesByRole(f *fakeVNet) map[string]vergeos.VNetRule {
 	m := map[string]vergeos.VNetRule{}
