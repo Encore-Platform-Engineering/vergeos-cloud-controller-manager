@@ -1410,7 +1410,7 @@ func TestSourceRanges_SpecWinsOverAnnotation(t *testing.T) {
 	}
 }
 
-// --- same-vnet / routed client reachability (#27) ---
+// --- same-vnet / routed client reachability (#41) ---
 
 func rulesByRole(f *fakeVNet) map[string]vergeos.VNetRule {
 	m := map[string]vergeos.VNetRule{}
@@ -1505,7 +1505,7 @@ func TestEnsure_SourceNATAndAcceptRules(t *testing.T) {
 	}
 }
 
-// --- concurrent allocation by two CCMs (#29) ---
+// --- concurrent allocation by two CCMs (#42) ---
 
 func TestEnsure_LosingCCMBacksOffToAnotherIP(t *testing.T) {
 	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
