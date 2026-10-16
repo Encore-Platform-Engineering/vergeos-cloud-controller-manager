@@ -134,7 +134,7 @@ func (f *vergeosFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	case "/api/v4/machine_nics":
 		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"$key": 3, "machine": 71, "vnet": 10, "macaddress": "52:54:00:aa:bb:cc", "ipaddress": "10.1.101.50"},
+			{"$key": 3, "machine": 71, "vnet": 10, "macaddress": "52:54:00:aa:bb:cc", "ipaddress": "192.0.2.50"},
 			{"$key": 4, "machine": 71, "vnet": 99, "macaddress": "52:54:00:aa:bb:dd", "ipaddress": "10.99.0.5"},
 		})
 	default:
@@ -175,7 +175,7 @@ func TestNewCloud_PrivateCA_InstanceMetadataRoundTrip(t *testing.T) {
 		t.Fatalf("InstanceMetadata over private-CA TLS: %v", err)
 	}
 	want := []v1.NodeAddress{
-		{Type: v1.NodeInternalIP, Address: "10.1.101.50"},
+		{Type: v1.NodeInternalIP, Address: "192.0.2.50"},
 		{Type: v1.NodeHostName, Address: "node-1"},
 	}
 	if len(meta.NodeAddresses) != 2 || meta.NodeAddresses[0] != want[0] || meta.NodeAddresses[1] != want[1] {
