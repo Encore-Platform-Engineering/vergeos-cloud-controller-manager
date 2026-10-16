@@ -579,9 +579,15 @@ func (d desiredRule) matches(r vergeos.VNetRule) bool {
 		sameIPSet(r.SourceIP, d.sourceIP)
 }
 
-// applyRules activates rule changes. It also applies when an earlier apply
-// failed (in-memory flag) or the vnet itself reports need_fw_apply (covers a
-// CCM crash between writing rules and applying them).
+// applyRules activates rule changes. VergeOS stages every rule edit on a vnet
+// until someone applies them, and ApplyRules activates all of them, so the CCM
+// only applies when it has something of its own to activate: it changed rules
+// (changed) or an earlier apply of its own failed (in-memory flag). Changes it
+// did not make (need_fw_apply with nothing of ours pending) are left staged and
+// logged, unless config.ApplyStagedChanges opts in to applying them, which
+// recovers from a CCM crash between writing rules and applying them.
+// Note that an apply for our own change still activates whatever else is
+// staged on the vnet; VergeOS has no per-rule apply.
 func (l *loadBalancer) applyRules(ctx context.Context, changed bool) error {
 	if !changed && !l.applyPending {
 		net, err := l.network.Get(ctx, l.config.NetworkID)
@@ -591,6 +597,11 @@ func (l *loadBalancer) applyRules(ctx context.Context, changed bool) error {
 		if net == nil || !net.NeedFWApply {
 			return nil
 		}
+		if !l.config.ApplyStagedChanges {
+			klog.Warningf("VNet %d has staged firewall changes (need_fw_apply) that this CCM did not make; not applying them (set loadBalancer.applyStagedChanges=true to apply, or apply them in VergeOS)", l.config.NetworkID)
+			return nil
+		}
+		klog.Infof("VNet %d has staged firewall changes; applying (loadBalancer.applyStagedChanges=true)", l.config.NetworkID)
 	}
 	l.applyPending = true
 	if err := l.network.ApplyRules(ctx, l.config.NetworkID); err != nil {
