@@ -209,6 +209,11 @@ func sameMAC(a, b string) bool {
 
 // vmNICs returns the VM's NICs on nodeNetworkID (all when 0), ordered by NIC key.
 func (i *instances) vmNICs(ctx context.Context, vm *vergeos.VM) ([]vergeos.VMNIC, error) {
+	return i.vmNICsOn(ctx, vm, i.nodeNetworkID)
+}
+
+// vmNICsOn returns the VM's NICs on vnet networkID (all when 0), ordered by NIC key.
+func (i *instances) vmNICsOn(ctx context.Context, vm *vergeos.VM, networkID int) ([]vergeos.VMNIC, error) {
 	if i.nics == nil {
 		return nil, nil
 	}
@@ -218,13 +223,37 @@ func (i *instances) vmNICs(ctx context.Context, vm *vergeos.VM) ([]vergeos.VMNIC
 	}
 	nics := make([]vergeos.VMNIC, 0, len(all))
 	for _, nic := range all {
-		if i.nodeNetworkID != 0 && nic.VNET.Int() != i.nodeNetworkID {
+		if networkID != 0 && nic.VNET.Int() != networkID {
 			continue
 		}
 		nics = append(nics, nic)
 	}
 	sort.SliceStable(nics, func(a, b int) bool { return nics[a].ID < nics[b].ID })
 	return nics, nil
+}
+
+// nicIPs returns the addresses of nics: DHCP leases first, and only when no
+// NIC has a lease, the guest-agent IPs matched to the NICs by MAC.
+func (i *instances) nicIPs(ctx context.Context, vm *vergeos.VM, nics []vergeos.VMNIC) []string {
+	if ips := nicLeaseIPs(nics); len(ips) > 0 {
+		return ips
+	}
+	return i.guestAgentIPs(ctx, vm, nics)
+}
+
+// ipsOnNetwork returns the node's IPv4 addresses on its NICs attached to vnet
+// networkID. An empty result means the node has no usable NIC on that vnet; an
+// error means the lookup itself failed (including errVMNotFound).
+func (i *instances) ipsOnNetwork(ctx context.Context, node *v1.Node, networkID int) ([]string, error) {
+	vm, err := i.getVM(ctx, node)
+	if err != nil {
+		return nil, err
+	}
+	nics, err := i.vmNICsOn(ctx, vm, networkID)
+	if err != nil {
+		return nil, err
+	}
+	return i.nicIPs(ctx, vm, nics), nil
 }
 
 // nicLeaseIPs returns machine_nics.ipaddress values (DHCP leases) of nics, in order.
@@ -286,10 +315,7 @@ func (i *instances) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloud
 	if err != nil {
 		return nil, err
 	}
-	ips := nicLeaseIPs(nics)
-	if len(ips) == 0 {
-		ips = i.guestAgentIPs(ctx, vm, nics)
-	}
+	ips := i.nicIPs(ctx, vm, nics)
 	if len(ips) == 0 {
 		// Fail so the node stays uninitialized (tainted) and the controller retries,
 		// instead of initializing it without an InternalIP.

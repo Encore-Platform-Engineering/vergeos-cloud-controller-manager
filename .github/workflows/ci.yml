@@ -50,9 +50,42 @@ jobs:
           helm template rel $chart $common --set loadBalancer.enabled=false >/dev/null
           helm template rel $chart $common --set loadBalancer.enabled=false --set vergeos.caSecret=my-ca >/dev/null
 
+  chart:
+    name: Push chart
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    env:
+      CHART: charts/vergeos-cloud-controller-manager
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Tag must be v + chart version and appVersion
+        run: |
+          for key in version appVersion; do
+            v=$(yq eval ".$key" "$CHART/Chart.yaml")
+            [ "$TAG" = "v$v" ] || { echo "::error::tag $TAG != v$v (Chart.yaml $key)"; exit 1; }
+          done
+      - name: Package and push chart
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package "$CHART" -d "$RUNNER_TEMP"
+          printf '%s' "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push "$RUNNER_TEMP/vergeos-cloud-controller-manager-${TAG#v}.tgz" oci://ghcr.io/encore-platform-engineering/charts
+
   package:
     name: Package image
-    needs: check
+    # chart gates the image push: a tag that does not match Chart.yaml publishes nothing.
+    # chart is skipped off-tag; skipped is not failed.
+    needs: [check, chart]
+    if: ${{ !cancelled() && !failure() }}
     permissions:
       contents: read
       packages: write
