@@ -146,6 +146,9 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `loadBalancer.enabled` | `false` | Enable LoadBalancer support; requires `networkID` > 0 and a non-empty `ipPool` (chart fails to render otherwise) |
 | `loadBalancer.networkID` | `0` | VNet network ID |
 | `loadBalancer.ipPool` | `[]` | Available LB IP addresses |
+| `loadBalancer.sourceNATTarget` | `""` | If set, add an outgoing `translate` (SNAT) rule per Service port with this target (see [Reachability](#reachability)) |
+| `loadBalancer.acceptRules` | `false` | Add an incoming `accept` rule per Service port (see [Reachability](#reachability)) |
+| `loadBalancer.applyStagedChanges` | `false` | Also apply vnet firewall changes the CCM did not make (see Operational notes) |
 | `replicaCount` | `1` | Number of replicas |
 | `nodeSelector` | `{}` | No selector: runs on control-plane or worker-only clusters (e.g. k0smotron) |
 | `tolerations` | control-plane, master, `node.cloudprovider.kubernetes.io/uninitialized`, not-ready, unreachable (all `operator: Exists`); not-ready/unreachable are tolerated for NoSchedule and, for NoExecute, only `tolerationSeconds: 300` so a dead node's CCM is rescheduled | Lets the CCM start on tainted/uninitialized/NotReady nodes |
@@ -227,7 +230,10 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
   "loadBalancer": {
     "enabled": true,
     "networkID": 1,
-    "ipPool": ["10.0.0.100", "10.0.0.101", "10.0.0.102"]
+    "ipPool": ["10.0.0.100", "10.0.0.101", "10.0.0.102"],
+    "sourceNATTarget": "",
+    "acceptRules": false,
+    "applyStagedChanges": false
   }
 }
 ```
@@ -266,13 +272,29 @@ The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet ru
 **Migrating from the old prefix scheme** (`k8s-<ns>-<svc>-<proto>-<port>`, empty description). Old names are ambiguous (`a-b/c` and `a/b-c` produce the same names), so a name match proves nothing. A legacy rule is adopted (renamed and stamped in place, no traffic interruption) only if **all** hold: empty description; name equals the legacy name of one of the Service's current ports; destination IP is in the Service's `status.loadBalancer.ingress`; destination port equals that port's `port` and target port equals its `nodePort`. The legacy ipalias is stamped only if an adopted rule points at the same IP. Anything else (e.g. rules for ports since removed) is never modified or deleted and must be cleaned up by hand.
 
 **Operational notes.**
-- Run a single CCM replica (or `--leader-elect=true`). IP allocation is serialised in-process only; during a leader-election overlap two CCMs could pick the same free IP (VergeOS rejecting duplicate ipalias IPs is not verified).
+- **Several CCMs on one vnet.** Run a single CCM replica per cluster (or `--leader-elect=true`). The in-process mutex only serialises one CCM; across CCMs (several clusters on one vnet, or a leader-election overlap) the check "is this IP free" and the alias create are not atomic. VergeOS is not known to reject a second `ipalias` with the same IP (not verified on a live VergeOS from this repo, so the CCM assumes it accepts duplicates). After creating an alias the CCM therefore re-lists the vnet's addresses: if more than one alias holds the IP, the lowest key keeps it, and the other CCM deletes its alias and retries with a different pool IP (or fails, if the IP was requested via `loadBalancerIP`/annotation, or the Service already used it). This resolves simultaneous claims, but a CCM can still briefly see its alias before the loser deletes its own. Overlapping pools across CCMs are therefore safe against duplicate allocation but still contend; give each CCM its own non-overlapping `ipPool` where you can.
 - Changing `--cluster-name` changes the ownership marker: existing LBs look foreign, their IPs count as in use, and the Services get new LBs. Clean up the old rules/aliases by hand.
-- ApplyRules is also issued when the vnet reports `need_fw_apply`, which recovers from a crash between writing rules and applying them (this also applies any other pending firewall change on that vnet).
+- **Applying firewall changes.** VergeOS stages rule edits until someone applies them, and `ApplyRules` activates every staged edit on the vnet. The CCM therefore only calls `ApplyRules` after it changed rules itself (or when its own earlier apply failed; that is remembered in memory and retried). If the vnet reports `need_fw_apply` and the CCM changed nothing, it logs a warning and leaves the staged changes alone, so half-finished UI edits or Terraform-owned rules on a shared vnet are not pushed live by a Service sync. Caveat: when the CCM does apply its own change, VergeOS activates any other staged edits too (there is no per-rule apply). Set `loadBalancer.applyStagedChanges: true` to also apply when only foreign changes are pending; this recovers from a CCM crash between writing and applying rules (the staged rules would otherwise wait for the next CCM change or a manual apply).
 
 Not supported: `allocateLoadBalancerNodePorts: false`, SCTP, IPv6 source ranges, `externalTrafficPolicy: Local`, per-Service vnet/pool (tracked in #7). Services with `spec.loadBalancerClass` are skipped by the cloud-provider service controller.
 
-**Same-vnet reachability** (clients on the same vnet as the ipalias, e.g. hosted-CP workers) is not yet verified; the rules use `direction=incoming`, `action=translate`, `interface=auto`.
+### Reachability
+
+By default each Service port is one `incoming`/`translate` (DNAT) rule: `<lb-ip>:<port>` → `<node-ips>:<nodePort>`. DNAT alone only works when the backend's reply returns through the LB vnet's router so it can be un-NATed. Whether that holds depends on where the client is:
+
+| Client | Default (DNAT only) |
+|--------|---------------------|
+| Pod/node in the cluster itself | Works: kube-proxy short-circuits traffic to the LB ingress IP. |
+| Another network, replies routed back via the LB vnet | Works. |
+| Same vnet as the LB IP (hairpin) | Breaks: the node replies straight to the client from its own IP, not the VIP, and the client drops it. Needs SNAT. |
+| A different vnet whose gateway for the nodes is not the LB vnet | Breaks: replies leave through another router and are never un-NATed. Needs SNAT or routing so replies return via the LB vnet. |
+
+Two opt-in options (cloud config, default off) add rules per Service port, owned and reconciled like the DNAT rule (removed again when the option is turned off):
+
+- `sourceNATTarget` — adds an `outgoing`/`translate` rule matching traffic to `<node-ips>:<nodePort>` with `target_ip` set to this value (the LB vnet's router address; use a VergeOS filter token or IP). The nodes then reply to the LB vnet, which un-NATs both directions. Costs: backends see the router IP, not the client IP, and `loadBalancerSourceRanges` is only enforced by the DNAT rule.
+- `acceptRules` — adds an `incoming`/`accept` rule for `<lb-ip>:<port>` (restricted to `loadBalancerSourceRanges`), for vnets whose firewall drops traffic no rule accepts.
+
+**Verification status.** These were NOT verified against a live VergeOS 26.1.7 from this repository: no VergeOS instance was available. What the VergeOS docs say ([Network Rules](https://docs.verge.io/run-the-platform/networking/network-rules), [Connection Tracking State](https://docs.verge.io/knowledge-base/networking/firewall-connection-tracking-state)): a `translate` action with `direction=outgoing` is source NAT and its target can be "My Router IP"; the generated forwarding chains use a `drop` policy with a trailing `ct state established,related accept`, so whether a `translate` rule implies accept for *new* connections is not documented (hence the opt-in `acceptRules`); return traffic needs no extra rule. The exact target token for "My Router IP" and the match order of the generated rules are not documented in the API, which is why `sourceNATTarget` is a required explicit value rather than a guessed default. To verify on your vnet, enable a Trace/Debug rule on the DNAT rule and test from (1) a VM on the same vnet, (2) a VM on a routed tenant vnet and (3) an external client, with and without these options, then record the results here.
 
 ## Building
 

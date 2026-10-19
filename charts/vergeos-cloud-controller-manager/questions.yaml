@@ -47,6 +47,20 @@ questions:
         label: IP Pool
         description: "Comma-separated list of IPs available for LoadBalancer allocation (e.g. 10.0.0.100,10.0.0.101)"
         type: string
+      - variable: loadBalancer.sourceNATTarget
+        label: Source NAT Target
+        description: "Optional: add an outgoing translate (SNAT) rule per Service port with this target (e.g. the vnet router IP) so same-vnet and routed clients get replies back through the LB vnet. Empty = off"
+        type: string
+      - variable: loadBalancer.acceptRules
+        label: Add Accept Rules
+        description: "Optional: add an incoming accept rule per Service port for vnets whose firewall drops traffic no rule accepts"
+        type: boolean
+        default: false
+      - variable: loadBalancer.applyStagedChanges
+        label: Apply Staged Firewall Changes
+        description: "Also apply the vnet's staged firewall changes that the CCM did not make (recovers from a crash between write and apply, but activates other people's pending edits). Off = only apply the CCM's own changes"
+        type: boolean
+        default: false
 
   - variable: imagePullSecrets[0].name
     label: Image Pull Secret

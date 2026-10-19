@@ -30,6 +30,17 @@ type fakeVNet struct {
 	failDelete func(name string) error
 	failApply  error
 	needFW     bool
+
+	// allowDupAddrs makes Create accept a second alias for an IP, as VergeOS
+	// may. beforeAddrCreate / afterAddrCreate run (with mu held) around an
+	// alias Create and simulate another CCM acting concurrently.
+	allowDupAddrs                     bool
+	beforeAddrCreate, afterAddrCreate func(f *fakeVNet, ip string)
+}
+
+// foreignAlias adds an alias owned by someone else; the caller holds f.mu or is single-threaded.
+func (f *fakeVNet) foreignAlias(ip string) {
+	f.addrs = append(f.addrs, vergeos.VNetAddress{Key: f.key(), IP: ip, Type: "ipalias", Hostname: "other-ccm", Description: "other"})
 }
 
 func (f *fakeVNet) key() vergeos.FlexInt { f.nextKey++; return vergeos.FlexInt(f.nextKey) }
@@ -63,7 +74,12 @@ func (r fakeRules) Create(ctx context.Context, req *vergeos.VNetRuleCreateReques
 		Key: r.f.key(), VNet: vergeos.FlexInt(req.VNet), Name: req.Name, Description: req.Description,
 		Enabled: *req.Enabled, Protocol: *req.Protocol, Direction: *req.Direction, Action: *req.Action,
 		DestinationIP: *req.DestinationIP, DestinationPorts: *req.DestinationPorts,
-		TargetIP: *req.TargetIP, TargetPorts: *req.TargetPorts,
+	}
+	if req.TargetIP != nil {
+		rule.TargetIP = *req.TargetIP
+	}
+	if req.TargetPorts != nil {
+		rule.TargetPorts = *req.TargetPorts
 	}
 	if req.SourceIP != nil {
 		rule.SourceIP = *req.SourceIP
@@ -159,13 +175,21 @@ func (a fakeAddrs) GetByIP(ctx context.Context, vnetID int, ip string) (*vergeos
 func (a fakeAddrs) Create(ctx context.Context, req *vergeos.VNetAddressCreateRequest) (*vergeos.VNetAddress, error) {
 	a.f.mu.Lock()
 	defer a.f.mu.Unlock()
-	for _, x := range a.f.addrs {
-		if x.IP == req.IP {
-			return nil, fmt.Errorf("duplicate address %s", req.IP)
+	if a.f.beforeAddrCreate != nil {
+		a.f.beforeAddrCreate(a.f, req.IP)
+	}
+	if !a.f.allowDupAddrs {
+		for _, x := range a.f.addrs {
+			if x.IP == req.IP {
+				return nil, fmt.Errorf("duplicate address %s", req.IP)
+			}
 		}
 	}
 	x := vergeos.VNetAddress{Key: a.f.key(), VNet: vergeos.FlexInt(req.VNet), IP: req.IP, Type: req.Type, Hostname: req.Hostname, Description: req.Description}
 	a.f.addrs = append(a.f.addrs, x)
+	if a.f.afterAddrCreate != nil {
+		a.f.afterAddrCreate(a.f, req.IP)
+	}
 	return &x, nil
 }
 func (a fakeAddrs) Update(ctx context.Context, id int, req *vergeos.VNetAddressUpdateRequest) (*vergeos.VNetAddress, error) {
@@ -1183,8 +1207,54 @@ func TestOwnedRuleOrderIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestEnsure_AppliesWhenVNetNeedsFWApply(t *testing.T) {
+func TestEnsure_DoesNotApplyForeignStagedChangesByDefault(t *testing.T) {
 	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	applies := f.applies
+
+	// Someone else staged a firewall change; we changed nothing.
+	f.needFW = true
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if f.applies != applies || !f.needFW {
+		t.Fatalf("foreign staged change must stay staged: applies %d->%d needFW=%v", applies, f.applies, f.needFW)
+	}
+	// Same for Update and Delete of a Service with nothing left to change.
+	if err := lb.UpdateLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err != nil {
+		t.Fatal(err)
+	}
+	other := testService("default", "gone", []v1.ServicePort{tcp(80, 30081)})
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", other); err != nil {
+		t.Fatal(err)
+	}
+	if f.applies != applies {
+		t.Fatalf("apply issued without own changes: %d -> %d", applies, f.applies)
+	}
+
+	// Our own change still applies (and that necessarily activates the staged edit).
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.2"))
+	if f.applies != applies+1 {
+		t.Errorf("own change must be applied, applies=%d", f.applies)
+	}
+}
+
+func TestEnsure_OwnFailedApplyIsStillRetriedByDefault(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	f.failApply = errors.New("apply down")
+	if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Fatal("expected apply failure")
+	}
+	f.failApply = nil
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if f.applies != 1 {
+		t.Errorf("failed own apply must be retried without a diff, applies=%d", f.applies)
+	}
+}
+
+func TestEnsure_AppliesStagedChangesWhenOptedIn(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	lb.config.ApplyStagedChanges = true
 	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
 	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
 	applies := f.applies
@@ -1199,7 +1269,7 @@ func TestEnsure_AppliesWhenVNetNeedsFWApply(t *testing.T) {
 	lb2 := newLoadBalancer(fakeRules{f}, fakeNet{f}, fakeAddrs{f}, internalIPTargets{}, lb.config)
 	mustEnsure(t, lb2, "c", svc, testNodes("10.0.1.1"))
 	if f.applies != applies+1 {
-		t.Errorf("need_fw_apply must trigger an apply, applies=%d", f.applies)
+		t.Errorf("need_fw_apply must trigger an apply when opted in, applies=%d", f.applies)
 	}
 }
 
@@ -1377,8 +1447,9 @@ func TestEnsure_AllocationDoesNotProbePerIP(t *testing.T) {
 	lb, f := newTestLB(bigPool(500)...)
 	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
 	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
-	// One GetByIP for ensureAddress at the chosen IP; the pool scan uses a single list.
-	if f.addrGets > 1 || f.addrLists != 1 {
+	// One GetByIP for ensureAddress at the chosen IP; the pool scan uses a single
+	// list, plus one list to verify the new alias against concurrent CCMs.
+	if f.addrGets > 1 || f.addrLists != 2 {
 		t.Errorf("allocation made %d GetByIP and %d list calls", f.addrGets, f.addrLists)
 	}
 }
@@ -1442,5 +1513,184 @@ func TestSourceRanges_SpecWinsOverAnnotation(t *testing.T) {
 	svc.Annotations[annotationSourceRanges] = ","
 	if got, err := sourceRanges(svc); err != nil || got != "10.0.0.0/8" {
 		t.Errorf("spec with blank annotation: got %q, %v", got, err)
+	}
+}
+
+// --- same-vnet / routed client reachability (#41) ---
+
+func rulesByRole(f *fakeVNet) map[string]vergeos.VNetRule {
+	m := map[string]vergeos.VNetRule{}
+	for _, r := range f.rules {
+		m[ruleKey(r.Direction, r.Action, r.Protocol, r.DestinationPorts)] = r
+	}
+	return m
+}
+
+func TestEnsure_DefaultHasNoSNATOrAcceptRules(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100")
+	mustEnsure(t, lb, "c", testService("default", "web", []v1.ServicePort{tcp(80, 30080)}), testNodes("10.0.1.1"))
+	if len(f.rules) != 1 {
+		t.Fatalf("want only the DNAT rule by default, got %+v", f.rules)
+	}
+}
+
+func TestEnsure_SourceNATAndAcceptRules(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	lb.config.SourceNATTarget = "10.0.0.1"
+	lb.config.AcceptRules = true
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080), {Port: 53, NodePort: 30053, Protocol: v1.ProtocolUDP}})
+	svc.Spec.LoadBalancerSourceRanges = []string{"192.168.0.0/16"}
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.2", "10.0.1.1"))
+	if ip != "10.0.0.100" {
+		t.Fatalf("ip = %s", ip)
+	}
+	if len(f.rules) != 6 || f.applies != 1 {
+		t.Fatalf("rules=%d applies=%d, want 6 rules and one apply: %+v", len(f.rules), f.applies, f.rules)
+	}
+	by := rulesByRole(f)
+	owner := newLBOwner("c", svc)
+
+	dnat := by["incoming/translate/tcp/80"]
+	if dnat.DestinationIP != ip || dnat.TargetIP != "10.0.1.1,10.0.1.2" || dnat.TargetPorts != "30080" {
+		t.Errorf("dnat %+v", dnat)
+	}
+	snat := by["outgoing/translate/tcp/30080"]
+	if snat.Name != owner.ruleName("tcp", 80)+"-snat" || snat.Description != owner.String() || !snat.Enabled ||
+		snat.DestinationIP != "10.0.1.1,10.0.1.2" || snat.TargetIP != "10.0.0.1" || snat.SourceIP != "" {
+		t.Errorf("snat %+v", snat)
+	}
+	if u := by["outgoing/translate/udp/30053"]; u.Protocol != "udp" || u.TargetIP != "10.0.0.1" {
+		t.Errorf("udp snat %+v", u)
+	}
+	acc := by["incoming/accept/tcp/80"]
+	if acc.Name != owner.ruleName("tcp", 80)+"-accept" || acc.DestinationIP != ip || acc.SourceIP != "192.168.0.0/16" ||
+		acc.TargetIP != "" || acc.TargetPorts != "" {
+		t.Errorf("accept %+v", acc)
+	}
+
+	// Idempotent: SNAT rules must not be mistaken for the LB IP, and nothing is rewritten.
+	creates, updates, deletes, applies, lists := f.creates, f.updates, f.deletes, f.applies, f.addrLists
+	if ip2 := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.2")); ip2 != ip {
+		t.Fatalf("ip changed to %s", ip2)
+	}
+	if f.creates != creates || f.updates != updates || f.deletes != deletes || f.applies != applies {
+		t.Error("idempotent ensure wrote")
+	}
+	if f.addrLists != lists {
+		t.Error("SNAT rule destinations (node IPs) were treated as moved LB IPs")
+	}
+	if st, found, err := lb.GetLoadBalancer(context.Background(), "c", svc); err != nil || !found || st.Ingress[0].IP != ip {
+		t.Errorf("GetLoadBalancer = %v %v %v", st, found, err)
+	}
+
+	// Node changes are reflected in the SNAT rule destination.
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.3"))
+	if got := rulesByRole(f)["outgoing/translate/tcp/30080"].DestinationIP; got != "10.0.1.1,10.0.1.3" {
+		t.Errorf("snat destination after node change = %q", got)
+	}
+
+	// Turning the options off removes the extra rules (they are owned) and keeps the DNAT rule.
+	lb.config.SourceNATTarget = ""
+	lb.config.AcceptRules = false
+	if mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.3")) != ip {
+		t.Fatal("ip changed")
+	}
+	if len(f.rules) != 2 {
+		t.Fatalf("want 2 DNAT rules left, got %+v", f.rules)
+	}
+
+	// Delete removes every owned rule kind and the alias.
+	lb.config.SourceNATTarget = "10.0.0.1"
+	lb.config.AcceptRules = true
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if err := lb.EnsureLoadBalancerDeleted(context.Background(), "c", svc); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rules) != 0 || f.hasAddr(ip) {
+		t.Errorf("leftovers: rules=%+v addrs=%+v", f.rules, f.addrs)
+	}
+}
+
+// --- concurrent allocation by two CCMs (#42) ---
+
+func TestEnsure_LosingCCMBacksOffToAnotherIP(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	f.allowDupAddrs = true
+	// Another CCM creates its alias for the first pool IP between our
+	// availability check and our create, so it gets the lower key.
+	f.beforeAddrCreate = func(f *fakeVNet, ip string) {
+		if ip == "10.0.0.100" {
+			f.foreignAlias(ip)
+		}
+	}
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1"))
+	if ip != "10.0.0.101" {
+		t.Fatalf("losing CCM got %s, want the next free IP 10.0.0.101", ip)
+	}
+	owner := newLBOwner("c", svc)
+	var at100, ours101 int
+	for _, a := range f.addrs {
+		switch {
+		case a.IP == "10.0.0.100" && a.Description == "other":
+			at100++
+		case a.IP == "10.0.0.100":
+			t.Errorf("losing CCM left its duplicate alias: %+v", a)
+		case a.IP == "10.0.0.101" && a.Description == owner.String():
+			ours101++
+		}
+	}
+	if at100 != 1 || ours101 != 1 || len(f.addrs) != 2 {
+		t.Errorf("unexpected aliases: %+v", f.addrs)
+	}
+	if r := f.ruleFor(t, "80", ip); r.DestinationIP != "10.0.0.101" {
+		t.Errorf("rule on wrong IP: %+v", r)
+	}
+}
+
+func TestEnsure_WinningCCMKeepsIP(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	f.allowDupAddrs = true
+	// The other CCM's alias appears after ours, so ours has the lowest key.
+	f.afterAddrCreate = func(f *fakeVNet, ip string) {
+		if ip == "10.0.0.100" && len(f.addrs) == 1 {
+			f.foreignAlias(ip)
+		}
+	}
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	if ip := mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1")); ip != "10.0.0.100" {
+		t.Fatalf("winner got %s, want 10.0.0.100", ip)
+	}
+	if len(f.addrs) != 2 {
+		t.Errorf("winner must not delete anything: %+v", f.addrs)
+	}
+}
+
+func TestEnsure_LostRaceOnRequestedIPFailsAndReleases(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	f.allowDupAddrs = true
+	f.beforeAddrCreate = func(f *fakeVNet, ip string) { f.foreignAlias(ip) }
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	svc.Spec.LoadBalancerIP = "10.0.0.101"
+	if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Fatal("expected error: requested IP was claimed by another CCM")
+	}
+	if len(f.addrs) != 1 || f.addrs[0].Description != "other" || len(f.rules) != 0 {
+		t.Errorf("losing CCM must release its alias and write no rules: addrs=%+v rules=%+v", f.addrs, f.rules)
+	}
+}
+
+func TestEnsure_LostRacesExhaustPool(t *testing.T) {
+	lb, f := newTestLB("10.0.0.100", "10.0.0.101")
+	f.allowDupAddrs = true
+	f.beforeAddrCreate = func(f *fakeVNet, ip string) { f.foreignAlias(ip) }
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Fatal("expected pool exhaustion after losing every IP")
+	}
+	for _, a := range f.addrs {
+		if a.Description != "other" {
+			t.Errorf("leftover alias of the losing CCM: %+v", a)
+		}
 	}
 }
