@@ -82,6 +82,21 @@ helm install vergeos-ccm ./charts/vergeos-cloud-controller-manager \
   --set 'loadBalancer.ipPool[1]=10.0.0.101'
 ```
 
+### Install from OCI
+
+Each `v*` tag publishes the chart (version = tag without `v`) to `oci://ghcr.io/encore-platform-engineering/charts`. The package is private, so log in first (a token with `read:packages`):
+
+```bash
+helm registry login ghcr.io -u <GITHUB_USER>
+helm install vergeos-ccm oci://ghcr.io/encore-platform-engineering/charts/vergeos-cloud-controller-manager \
+  --version 0.1.1 --namespace kube-system \
+  --set vergeos.host=<VERGEOS_HOST> \
+  --set vergeos.apiKey=<API_KEY> \
+  --set 'imagePullSecrets[0].name=ghcr-credentials'
+```
+
+`helm template` takes the same arguments.
+
 ### Verify
 
 ```bash
@@ -116,7 +131,7 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `image.repository` | `ghcr.io/encore-platform-engineering/vergeos-cloud-controller-manager` | Container image |
 | `image.tag` | `""` | Image tag; empty = `v` + chart `appVersion` (CI publishes on git tags `v*`) |
 | `imagePullSecrets` | `[]` | Image pull secrets for private registries |
-| `vergeos.host` | `""` | VergeOS API host (e.g., `vergeos.example.net`) |
+| `vergeos.host` | `""` | VergeOS API host or URL (e.g., `192.0.2.10` or `https://vergeos.example.net`); `https://` is assumed when no scheme is given |
 | `vergeos.apiKey` | `""` | API key authentication |
 | `vergeos.verifySSL` | `"true"` | TLS certificate verification. `"false"` disables it (the CCM logs a warning) — prefer `caBundle`/`caSecret` |
 | `vergeos.caBundle` | `""` | Inline PEM CA to trust for the VergeOS API (private/self-signed CA) |
@@ -187,7 +202,7 @@ Credentials are provided via environment variables (injected from a Kubernetes S
 
 | Variable | Description |
 |----------|-------------|
-| `VERGEOS_HOST` | VergeOS API host (e.g., `vergeos.example.net`) |
+| `VERGEOS_HOST` | VergeOS API host or URL (e.g., `192.0.2.10` or `https://vergeos.example.net`); `https://` is assumed when no scheme is given |
 | `VERGEOS_API_KEY` | API key for authentication |
 | `VERGEOS_VERIFY_SSL` | Verify TLS certificates (`true`/`false`, default: `true`). `false` disables verification and logs a warning. |
 | `VERGEOS_CA_FILE` | PEM file with extra CA certificates to trust (same as `caFile` in the cloud config). |
