@@ -350,3 +350,67 @@ func TestMultiReplicaPrefersSpreading(t *testing.T) {
 		t.Errorf("replicas>1 should add preferred anti-affinity, got %+v", a)
 	}
 }
+
+// #30
+func TestExternalModeRunsOutsideWorkloadCluster(t *testing.T) {
+	if _, err := helmTemplate(t, "--set", "external.enabled=true"); err == nil {
+		t.Error("expected render failure without external.kubeconfigSecret")
+	}
+	r := mustRender(t,
+		"--set", "external.enabled=true",
+		"--set", "external.kubeconfigSecret=tenant-a-kubeconfig",
+		"--set", "extraArgs={--cluster-name=tenant-a}")
+
+	spec := r.deployment.Spec.Template.Spec
+	if spec.HostNetwork || spec.DNSPolicy != corev1.DNSClusterFirst {
+		t.Errorf("want hostNetwork=false + ClusterFirst, got %v / %v", spec.HostNetwork, spec.DNSPolicy)
+	}
+	if len(spec.Tolerations) != 0 {
+		t.Errorf("no node tolerations expected, got %v", spec.Tolerations)
+	}
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Error("management-cluster SA token must not be mounted")
+	}
+	if ru := r.deployment.Spec.Strategy.RollingUpdate; ru != nil {
+		t.Errorf("non-hostNetwork rollout should use default strategy, got %+v", ru)
+	}
+
+	cmd := strings.Join(spec.Containers[0].Command, " ")
+	for _, want := range []string{
+		"--kubeconfig=/etc/kubernetes/workload-cluster/kubeconfig",
+		"--authentication-kubeconfig=/etc/kubernetes/workload-cluster/kubeconfig",
+		"--authorization-kubeconfig=/etc/kubernetes/workload-cluster/kubeconfig",
+		"--cluster-name=tenant-a",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command missing %q: %s", want, cmd)
+		}
+	}
+	found := false
+	for _, v := range spec.Volumes {
+		if v.Name == "workload-kubeconfig" && v.Secret != nil && v.Secret.SecretName == "tenant-a-kubeconfig" &&
+			len(v.Secret.Items) == 1 && v.Secret.Items[0].Key == "value" && v.Secret.Items[0].Path == "kubeconfig" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("kubeconfig Secret volume missing: %+v", spec.Volumes)
+	}
+
+	for _, m := range r.allManifests {
+		switch m["kind"] {
+		case "ServiceAccount", "ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding":
+			t.Errorf("external mode must not render in-cluster %v", m["kind"])
+		}
+	}
+}
+
+func TestDefaultModeHasNoKubeconfigFlags(t *testing.T) {
+	spec := mustRender(t).deployment.Spec.Template.Spec
+	if strings.Contains(strings.Join(spec.Containers[0].Command, " "), "kubeconfig") {
+		t.Errorf("in-cluster mode must use in-cluster config: %v", spec.Containers[0].Command)
+	}
+	if spec.ServiceAccountName != "vergeos-ccm" {
+		t.Errorf("serviceAccountName = %q", spec.ServiceAccountName)
+	}
+}

@@ -40,8 +40,9 @@ func newCloud(config io.Reader) (*cloud, error) {
 	if cfg.LoadBalancer.Enabled {
 		var workers []*loadBalancer
 		for _, n := range cfg.LoadBalancer.networks() {
-			workers = append(workers, newLoadBalancer(client.VNetRules, client.Networks, client.VNetAddresses, c.instances,
-				lbConfig{Enabled: true, NetworkID: n.NetworkID, IPPool: n.IPPool}))
+			lc := cfg.LoadBalancer
+			lc.NetworkID, lc.IPPool = n.NetworkID, n.IPPool
+			workers = append(workers, newLoadBalancer(client.VNetRules, client.Networks, client.VNetAddresses, c.instances, lc))
 		}
 		c.lb = newLBRouter(workers...)
 	}

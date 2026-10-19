@@ -1,3 +1,9 @@
+{{- $external := .Values.external.enabled }}
+{{- if and $external (not .Values.external.kubeconfigSecret) }}
+{{- fail "external.kubeconfigSecret must name the Secret holding the workload cluster kubeconfig when external.enabled=true" }}
+{{- end }}
+{{- /* External mode runs in a management cluster: no host networking, no node tolerations. */}}
+{{- $hostNetwork := and (not $external) .Values.hostNetwork }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,7 +11,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.replicaCount }}
-  {{- if .Values.hostNetwork }}
+  {{- if $hostNetwork }}
   # hostNetwork pods bind a host port: a surge pod could never schedule next to the old one.
   strategy:
     type: RollingUpdate
@@ -21,10 +27,16 @@ spec:
       labels:
         app: {{ .Release.Name }}
     spec:
+      {{- if $external }}
+      # The pod talks to the workload cluster only through the mounted kubeconfig;
+      # it needs no credentials for the management cluster it runs in.
+      automountServiceAccountToken: false
+      {{- else }}
       serviceAccountName: {{ .Release.Name }}
+      {{- end }}
       priorityClassName: {{ .Values.priorityClassName }}
-      hostNetwork: {{ .Values.hostNetwork }}
-      dnsPolicy: {{ .Values.dnsPolicy }}
+      hostNetwork: {{ $hostNetwork }}
+      dnsPolicy: {{ if $external }}ClusterFirst{{ else }}{{ .Values.dnsPolicy }}{{ end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- with .Values.imagePullSecrets }}
@@ -49,9 +61,11 @@ spec:
                   matchLabels:
                     app: {{ .Release.Name }}
       {{- end }}
+      {{- if not $external }}
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}
       containers:
         - name: vergeos-cloud-controller-manager
@@ -65,6 +79,14 @@ spec:
             - --leader-elect=true
             - --secure-port={{ .Values.securePort }}
             - --v=2
+            {{- if $external }}
+            - --kubeconfig=/etc/kubernetes/workload-cluster/kubeconfig
+            - --authentication-kubeconfig=/etc/kubernetes/workload-cluster/kubeconfig
+            - --authorization-kubeconfig=/etc/kubernetes/workload-cluster/kubeconfig
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
           ports:
             - name: https
               containerPort: {{ .Values.securePort }}
@@ -105,6 +127,11 @@ spec:
               subPath: ca.crt
               readOnly: true
             {{- end }}
+            {{- if $external }}
+            - name: workload-kubeconfig
+              mountPath: /etc/kubernetes/workload-cluster
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -131,6 +158,14 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        {{- end }}
+        {{- if $external }}
+        - name: workload-kubeconfig
+          secret:
+            secretName: {{ .Values.external.kubeconfigSecret }}
+            items:
+              - key: {{ .Values.external.kubeconfigSecretKey }}
+                path: kubeconfig
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

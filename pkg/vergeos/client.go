@@ -36,8 +36,15 @@ func verifySSLDisabled() bool {
 // newVergeOSClient builds the API client from the environment (VERGEOS_*) and
 // cfg. It fails fast with an error naming the missing variable.
 func newVergeOSClient(cfg *cloudConfig) (*vergeos.Client, error) {
-	if os.Getenv(envHost) == "" {
+	host := os.Getenv(envHost)
+	if host == "" {
 		return nil, fmt.Errorf("%s is not set: the VergeOS API URL is required", envHost)
+	}
+	// Accept a bare host/IP: the client needs a full URL.
+	if !strings.Contains(host, "://") {
+		if err := os.Setenv(envHost, "https://"+host); err != nil {
+			return nil, fmt.Errorf("setting %s: %w", envHost, err)
+		}
 	}
 	hasBasic := os.Getenv(envUsername) != "" && os.Getenv(envPassword) != ""
 	if !hasBasic && os.Getenv(envAPIKey) == "" {
