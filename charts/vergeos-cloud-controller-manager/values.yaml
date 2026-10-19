@@ -51,6 +51,16 @@ loadBalancer:
   enabled: false
   networkID: 0
   ipPool: []
+  # Opt-in rules for clients on the LB vnet or routed from another vnet (see README
+  # "Reachability"). sourceNATTarget adds an outgoing translate (SNAT) rule per port
+  # with this target (e.g. the vnet's router IP); acceptRules adds an incoming accept
+  # rule per port for vnets whose firewall drops unmatched traffic.
+  sourceNATTarget: ""
+  acceptRules: false
+  # Apply the vnet's staged firewall changes even when the CCM changed nothing (recovers
+  # from a crash between writing and applying rules, but also activates other people's
+  # pending edits on that vnet). Default: only apply after the CCM's own changes.
+  applyStagedChanges: false
   # Extra vnets a Service can select with the annotation
   # loadbalancer.vergeos.io/network-id. Only the vnets listed here (and
   # networkID above) are selectable. Example:

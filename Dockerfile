@@ -6,7 +6,9 @@ RUN apk add --no-cache git
 WORKDIR /src
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /vergeos-ccm ./cmd/vergeos-cloud-controller-manager/
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /vergeos-ccm ./cmd/vergeos-cloud-controller-manager/
 
 # Runtime stage
 FROM alpine:3.21

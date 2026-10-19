@@ -156,3 +156,19 @@ func TestParseConfig_AdditionalNetworks(t *testing.T) {
 		}
 	}
 }
+
+func TestParseConfig_SourceNATAndAccept(t *testing.T) {
+	cfg, err := parseConfig(strings.NewReader(`{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":["192.0.2.100"],"sourceNATTarget":"192.0.2.1","acceptRules":true}}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LoadBalancer.SourceNATTarget != "192.0.2.1" || !cfg.LoadBalancer.AcceptRules {
+		t.Errorf("sourceNATTarget/acceptRules not parsed: %+v", cfg.LoadBalancer)
+	}
+	for _, bad := range []string{`"a b"`, `"x\"y"`, `"1.2.3.4;"`} {
+		in := `{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":["192.0.2.100"],"sourceNATTarget":` + bad + `}}`
+		if _, err := parseConfig(strings.NewReader(in)); err == nil {
+			t.Errorf("sourceNATTarget %s: expected error", bad)
+		}
+	}
+}
