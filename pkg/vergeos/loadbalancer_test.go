@@ -220,9 +220,22 @@ func (n fakeNet) ApplyRules(ctx context.Context, id int) error {
 	return nil
 }
 
+// internalIPTargets resolves a node's target as its status InternalIP, so
+// tests that are not about target selection can use plain testNodes.
+type internalIPTargets struct{}
+
+func (internalIPTargets) ipsOnNetwork(ctx context.Context, node *v1.Node, networkID int) ([]string, error) {
+	for _, a := range node.Status.Addresses {
+		if a.Type == v1.NodeInternalIP {
+			return []string{a.Address}, nil
+		}
+	}
+	return nil, nil
+}
+
 func newTestLB(pool ...string) (*loadBalancer, *fakeVNet) {
 	f := &fakeVNet{}
-	lb := newLoadBalancer(fakeRules{f}, fakeNet{f}, fakeAddrs{f}, lbConfig{Enabled: true, NetworkID: 5, IPPool: pool})
+	lb := newLoadBalancer(fakeRules{f}, fakeNet{f}, fakeAddrs{f}, internalIPTargets{}, lbConfig{Enabled: true, NetworkID: 5, IPPool: pool})
 	return lb, f
 }
 
@@ -329,15 +342,108 @@ func TestGetLoadBalancerName(t *testing.T) {
 	}
 }
 
-func TestNodeAddresses(t *testing.T) {
-	addrs := nodeAddresses(testNodes("10.0.1.1", "10.0.1.2", "10.0.1.3"))
-	if len(addrs) != 3 || addrs[0] != "10.0.1.1" {
-		t.Errorf("unexpected addrs %v", addrs)
+func TestTargets_DualNICUsesLBVnetNIC(t *testing.T) {
+	// Node vnet 10 (InternalIP) and LB vnet 5; targets must be the vnet-5 NICs.
+	vms := &fakeVMs{byFilter: map[string][]vergeos.VM{
+		nameFilter("node-0"): {{ID: 1, Machine: 101, Name: "node-0"}},
+		nameFilter("node-1"): {{ID: 2, Machine: 102, Name: "node-1"}},
+	}}
+	nics := &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
+		switch machineID {
+		case 101:
+			return []vergeos.VMNIC{
+				{ID: 1, VNET: 10, MAC: "52:54:00:00:00:01", IPAddress: "10.0.1.1"},
+				{ID: 2, VNET: 5, MAC: "52:54:00:00:00:02", IPAddress: "10.5.0.11"},
+			}, nil
+		default: // static addressing on vnet 5: no lease, guest agent only
+			return []vergeos.VMNIC{
+				{ID: 3, VNET: 10, MAC: "52:54:00:00:01:01", IPAddress: "10.0.1.2"},
+				{ID: 4, VNET: 5, MAC: "52:54:00:00:01:02"},
+			}, nil
+		}
+	}}
+	agent := agentWith(
+		vergeos.GuestNetworkInterface{Name: "eth0", HardwareAddress: "52:54:00:00:01:01", IPAddresses: v4("10.0.1.2")},
+		vergeos.GuestNetworkInterface{Name: "eth1", HardwareAddress: "52:54:00:00:01:02", IPAddresses: v4("10.5.0.12")},
+	)
+	lb, f := newTestLB("10.5.0.100")
+	lb.nodes = &instances{vms: vms, nics: nics, machineStatus: agent, nodeNetworkID: 10}
+
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	mustEnsure(t, lb, "c", svc, testNodes("10.0.1.1", "10.0.1.2"))
+	if got := f.ruleFor(t, "80", "10.5.0.100").TargetIP; got != "10.5.0.11,10.5.0.12" {
+		t.Errorf("targets = %q, want the vnet-5 NIC addresses", got)
 	}
 }
 
-func TestSortedTargets(t *testing.T) {
-	got := sortedTargets(testNodes("10.0.1.3", "10.0.1.1", "10.0.1.3"))
+func TestTargets_SkipsNodesWithoutLBVnetNIC(t *testing.T) {
+	vms := &fakeVMs{byFilter: map[string][]vergeos.VM{
+		nameFilter("node-0"): {{ID: 1, Machine: 101, Name: "node-0"}},
+		nameFilter("node-1"): {{ID: 2, Machine: 102, Name: "node-1"}},
+		// node-2 has no VM at all.
+	}}
+	nics := &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
+		if machineID == 101 {
+			return []vergeos.VMNIC{{ID: 1, VNET: 5, IPAddress: "10.5.0.11"}}, nil
+		}
+		return []vergeos.VMNIC{{ID: 2, VNET: 10, IPAddress: "10.0.1.2"}}, nil // vnet 10 only
+	}}
+	lb, _ := newTestLB("10.5.0.100")
+	lb.nodes = &instances{vms: vms, nics: nics, machineStatus: noAgent()}
+
+	got, err := lb.targets(context.Background(), testNodes("10.0.1.1", "10.0.1.2", "10.0.1.3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "10.5.0.11" {
+		t.Errorf("targets = %v, want only node-0's vnet-5 NIC", got)
+	}
+}
+
+func TestTargets_NoQualifyingNodeIsError(t *testing.T) {
+	vms := &fakeVMs{byFilter: map[string][]vergeos.VM{
+		nameFilter("node-0"): {{ID: 1, Machine: 101, Name: "node-0"}},
+	}}
+	nics := &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
+		return []vergeos.VMNIC{{ID: 1, VNET: 10, IPAddress: "10.0.1.1"}}, nil // no vnet-5 NIC
+	}}
+	lb, f := newTestLB("10.5.0.100")
+	lb.nodes = &instances{vms: vms, nics: nics, machineStatus: noAgent()}
+
+	svc := testService("default", "web", []v1.ServicePort{tcp(80, 30080)})
+	if _, err := lb.EnsureLoadBalancer(context.Background(), "c", svc, testNodes("10.0.1.1")); err == nil {
+		t.Fatal("expected an error when no node has a NIC on the LB vnet")
+	}
+	if len(f.rules) != 0 || len(f.addrs) != 0 {
+		t.Errorf("nothing may be created without targets: rules=%v addrs=%v", f.rules, f.addrs)
+	}
+}
+
+// A failed NIC lookup must fail the sync instead of silently shrinking the target set.
+func TestTargets_LookupErrorIsNotSkipped(t *testing.T) {
+	vms := &fakeVMs{byFilter: map[string][]vergeos.VM{
+		nameFilter("node-0"): {{ID: 1, Machine: 101, Name: "node-0"}},
+		nameFilter("node-1"): {{ID: 2, Machine: 102, Name: "node-1"}},
+	}}
+	nics := &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
+		if machineID == 102 {
+			return nil, errors.New("boom")
+		}
+		return []vergeos.VMNIC{{ID: 1, VNET: 5, IPAddress: "10.5.0.11"}}, nil
+	}}
+	lb, _ := newTestLB("10.5.0.100")
+	lb.nodes = &instances{vms: vms, nics: nics, machineStatus: noAgent()}
+	if _, err := lb.targets(context.Background(), testNodes("10.0.1.1", "10.0.1.2")); err == nil {
+		t.Fatal("expected the NIC list error to be returned")
+	}
+}
+
+func TestTargets_DedupAndSorted(t *testing.T) {
+	lb, _ := newTestLB("10.5.0.100")
+	got, err := lb.targets(context.Background(), testNodes("10.0.1.3", "10.0.1.1", "10.0.1.3"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Join(got, ",") != "10.0.1.1,10.0.1.3" {
 		t.Errorf("got %v", got)
 	}
@@ -1095,7 +1201,7 @@ func TestEnsure_AppliesWhenVNetNeedsFWApply(t *testing.T) {
 	// Simulate a restart after a crash between rule write and apply:
 	// fresh LB (no in-memory flag), vnet still flagged.
 	f.needFW = true
-	lb2 := newLoadBalancer(fakeRules{f}, fakeNet{f}, fakeAddrs{f}, lb.config)
+	lb2 := newLoadBalancer(fakeRules{f}, fakeNet{f}, fakeAddrs{f}, internalIPTargets{}, lb.config)
 	mustEnsure(t, lb2, "c", svc, testNodes("10.0.1.1"))
 	if f.applies != applies+1 {
 		t.Errorf("need_fw_apply must trigger an apply, applies=%d", f.applies)

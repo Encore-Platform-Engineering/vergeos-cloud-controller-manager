@@ -64,10 +64,41 @@ jobs:
           platforms: linux/amd64
           push: false
 
+  chart:
+    name: Push chart
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    env:
+      CHART: charts/vergeos-cloud-controller-manager
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Tag must be v + chart version and appVersion
+        run: |
+          for key in version appVersion; do
+            v=$(yq eval ".$key" "$CHART/Chart.yaml")
+            [ "$TAG" = "v$v" ] || { echo "::error::tag $TAG != v$v (Chart.yaml $key)"; exit 1; }
+          done
+      - name: Package and push chart
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package "$CHART" -d "$RUNNER_TEMP"
+          printf '%s' "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push "$RUNNER_TEMP/vergeos-cloud-controller-manager-${TAG#v}.tgz" oci://ghcr.io/encore-platform-engineering/charts
+
   release:
     name: Push image
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    # chart gates the image: a tag that does not match Chart.yaml publishes nothing
+    needs: [build, chart]
     permissions:
       contents: read
       packages: write

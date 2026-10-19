@@ -28,10 +28,18 @@ const (
 	ownerTag = "vergeos-ccm/v1"
 )
 
+// nodeTargets resolves where a node can be reached on a given vnet.
+type nodeTargets interface {
+	// ipsOnNetwork returns the node's IPv4 addresses on its NICs attached to
+	// vnet networkID; empty if it has none.
+	ipsOnNetwork(ctx context.Context, node *v1.Node, networkID int) ([]string, error)
+}
+
 type loadBalancer struct {
 	rules   VNetRuleClient
 	network NetworkClient
 	addrs   VNetAddressClient
+	nodes   nodeTargets
 	config  lbConfig
 
 	// mu serialises all LB operations: the service controller runs several
@@ -42,8 +50,8 @@ type loadBalancer struct {
 	applyPending bool
 }
 
-func newLoadBalancer(rules VNetRuleClient, network NetworkClient, addrs VNetAddressClient, config lbConfig) *loadBalancer {
-	return &loadBalancer{rules: rules, network: network, addrs: addrs, config: config}
+func newLoadBalancer(rules VNetRuleClient, network NetworkClient, addrs VNetAddressClient, nodes nodeTargets, config lbConfig) *loadBalancer {
+	return &loadBalancer{rules: rules, network: network, addrs: addrs, nodes: nodes, config: config}
 }
 
 // lbOwner identifies the Service a rule or ipalias belongs to.
@@ -332,33 +340,42 @@ func (l *loadBalancer) chooseIP(ctx context.Context, svc *v1.Service, owner lbOw
 	return firstFree, nil
 }
 
-// nodeAddresses extracts internal IPs from a list of nodes.
-func nodeAddresses(nodes []*v1.Node) []string {
-	var addrs []string
-	for _, n := range nodes {
-		for _, addr := range n.Status.Addresses {
-			if addr.Type == v1.NodeInternalIP {
-				addrs = append(addrs, addr.Address)
-				break // One IP per node is enough.
-			}
-		}
-	}
-	return addrs
-}
-
-// sortedTargets returns the node IPs deduplicated and sorted, so the same
-// node set always yields the same target string (no spurious updates).
-func sortedTargets(nodes []*v1.Node) []string {
+// targets returns the translate targets for nodes: one address per node, taken
+// from the node's VM NIC on the LB vnet (DHCP lease, else guest-agent IP by
+// MAC), deduplicated and sorted so the same node set always yields the same
+// target string (no spurious updates). Node.status.addresses is deliberately
+// not used: it follows nodeNetworkID, which need not be the LB vnet, and an
+// address on another vnet is unreachable from the LB's router.
+//
+// A node with no NIC on the LB vnet, or whose VM no longer exists, is skipped
+// and logged. Any other lookup failure is returned, so a transient API error
+// never shrinks the target set. If no node qualifies, it is an error.
+func (l *loadBalancer) targets(ctx context.Context, nodes []*v1.Node) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
-	for _, a := range nodeAddresses(nodes) {
-		if !seen[a] {
-			seen[a] = true
-			out = append(out, a)
+	for _, n := range nodes {
+		ips, err := l.nodes.ipsOnNetwork(ctx, n, l.config.NetworkID)
+		if isVMNotFound(err) {
+			klog.Warningf("Skipping node %q as a LoadBalancer target: %v", n.Name, err)
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolving LoadBalancer target for node %q: %w", n.Name, err)
+		}
+		if len(ips) == 0 {
+			klog.Warningf("Skipping node %q as a LoadBalancer target: no NIC address on vnet %d", n.Name, l.config.NetworkID)
+			continue
+		}
+		if !seen[ips[0]] {
+			seen[ips[0]] = true
+			out = append(out, ips[0])
 		}
 	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("none of the %d nodes has a NIC address on LoadBalancer vnet %d", len(nodes), l.config.NetworkID)
+	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // sameIPSet compares comma-separated IP lists ignoring order.
@@ -838,7 +855,11 @@ func (l *loadBalancer) converge(ctx context.Context, clusterName string, svc *v1
 	if err != nil {
 		return "", err
 	}
-	desired, err := buildDesired(owner, svc, ip, sortedTargets(nodes), sources, l.config)
+	targets, err := l.targets(ctx, nodes)
+	if err != nil {
+		return "", err
+	}
+	desired, err := buildDesired(owner, svc, ip, targets, sources, l.config)
 	if err != nil {
 		return "", err
 	}

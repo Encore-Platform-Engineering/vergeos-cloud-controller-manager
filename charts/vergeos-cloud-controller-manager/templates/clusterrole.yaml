@@ -1,3 +1,4 @@
+{{- if not .Values.external.enabled }}
 # Cluster-wide: read-only. The shared informers (nodes, services) and the
 # delegated authn/authz of the secure-serving endpoint run as this ServiceAccount.
 # Node/Service writes are done by the per-controller ServiceAccounts
@@ -47,3 +48,4 @@ rules:
     resources: ["serviceaccounts/token"]
     resourceNames: ["node-controller", "service-controller", "route-controller"]
     verbs: ["create"]
+{{- end }}
