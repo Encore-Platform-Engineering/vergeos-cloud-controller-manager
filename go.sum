@@ -158,12 +158,6 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/tmc/grpc-websocket-proxy v0.0.0-20220101234140-673ab2c3ae75 h1:6fotK7otjonDflCTK0BCfls4SPy3NcCVb5dqqmbRknE=
 github.com/tmc/grpc-websocket-proxy v0.0.0-20220101234140-673ab2c3ae75/go.mod h1:KO6IkyS8Y3j8OdNO85qEYBsRPuteD+YciPomcXdrMnk=
-github.com/verge-io/govergeos v0.1.3 h1:76xSanCgXXRQKwlJXgsToLw/H2xzzugd6rf5n7QHCGw=
-github.com/verge-io/govergeos v0.1.3/go.mod h1:iMDZ50feEQ57fuqGmvtsAUUYYBz000nQ8kqI4Y8bT8U=
-github.com/verge-io/govergeos v0.1.8-0.20260320175107-bd9aa47de966 h1:3tbJkAy/YQS2/91KGsOaNUgzLLBa0ASxaiPUxkF/DZI=
-github.com/verge-io/govergeos v0.1.8-0.20260320175107-bd9aa47de966/go.mod h1:iMDZ50feEQ57fuqGmvtsAUUYYBz000nQ8kqI4Y8bT8U=
-github.com/verge-io/govergeos v0.1.8-0.20260320183601-565bcc9fb13c h1:nwdEV2SKisoNFCfOX0QcB9xCmsjbRYGML2FGZ24GMMo=
-github.com/verge-io/govergeos v0.1.8-0.20260320183601-565bcc9fb13c/go.mod h1:iMDZ50feEQ57fuqGmvtsAUUYYBz000nQ8kqI4Y8bT8U=
 github.com/verge-io/govergeos v0.1.9-0.20260320192948-2978a98c7459 h1:IDuBZZdT7fkDk72VE50YPxVjMzsT3SLXbgKWAP/0ibs=
 github.com/verge-io/govergeos v0.1.9-0.20260320192948-2978a98c7459/go.mod h1:iMDZ50feEQ57fuqGmvtsAUUYYBz000nQ8kqI4Y8bT8U=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
