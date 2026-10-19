@@ -250,7 +250,7 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
 
 The CCM implements the Kubernetes `InstancesV2` interface:
 
-1. **InstanceMetadata** — Resolves a Kubernetes node to a VergeOS VM, then returns the provider ID (`vergeos://<vm-uuid>`), instance type (`<cpu>cpu-<ram>mb`), and addresses: `InternalIP`s from the VM's NIC DHCP leases (`machine_nics.ipaddress`, optionally limited to `nodeNetworkID`), falling back to qemu-guest-agent IPs of interfaces whose MAC matches a VM NIC on that vnet (docker/CNI/bridge/loopback/link-local are skipped), plus a `Hostname` equal to the node name. If no InternalIP is found it returns an error so the node stays uninitialized and is retried.
+1. **InstanceMetadata** — Resolves a Kubernetes node to a VergeOS VM, then returns the provider ID (`vergeos://<vm-uuid>`), instance type (`<cpu>cpu-<ram>mb`), and addresses: `InternalIP`s from the VM's NIC DHCP leases (`machine_nics.ipaddress`, optionally limited to `nodeNetworkID`), falling back to qemu-guest-agent IPs of interfaces whose MAC matches a VM NIC on that vnet (docker/CNI/bridge/loopback/link-local are skipped; one address per NIC, the first the agent reports, so secondary/floating addresses such as a keepalived VIP are not node addresses), plus a `Hostname` equal to the node name. If no InternalIP is found it returns an error so the node stays uninitialized and is retried.
 2. **InstanceExists** — Checks whether the backing VM still exists.
 3. **InstanceShutdown** — Reports whether the VM is powered off.
 

@@ -806,6 +806,43 @@ func TestInstanceMetadata_AgentSkipsVirtualInterfaces(t *testing.T) {
 	}
 }
 
+// A floating address (keepalived/kube-vip VIP) added to the same interface as a
+// secondary address must not become a second InternalIP; each NIC reports only
+// its first (primary) address.
+func TestInstanceMetadata_AgentIgnoresSecondaryAddresses(t *testing.T) {
+	i := &instances{
+		vms: metaVM(),
+		machineStatus: agentWith(
+			vergeos.GuestNetworkInterface{Name: "eth0", HardwareAddress: "52:54:00:00:00:01", IPAddresses: []vergeos.GuestIPAddress{
+				{Type: "ipv4", Address: "192.0.2.11"},
+				{Type: "ipv4", Address: "192.0.2.10"}, // VIP
+			}},
+			vergeos.GuestNetworkInterface{Name: "eth1", HardwareAddress: "52:54:00:00:00:02", IPAddresses: []vergeos.GuestIPAddress{
+				{Type: "ipv4", Address: "198.51.100.5"},
+				{Type: "ipv4", Address: "198.51.100.6"},
+			}},
+		),
+		nics: &mockNICClient{list: func(ctx context.Context, machineID int) ([]vergeos.VMNIC, error) {
+			return []vergeos.VMNIC{
+				{ID: 1, VNET: 10, MAC: "52:54:00:00:00:01"},
+				{ID: 2, VNET: 20, MAC: "52:54:00:00:00:02"},
+			}, nil
+		}},
+	}
+	meta, err := i.InstanceMetadata(context.Background(), testNode("ns-machine", "vergeos://42"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []v1.NodeAddress{
+		{Type: v1.NodeInternalIP, Address: "192.0.2.11"},
+		{Type: v1.NodeInternalIP, Address: "198.51.100.5"},
+		{Type: v1.NodeHostName, Address: "ns-machine"},
+	}
+	if !reflect.DeepEqual(meta.NodeAddresses, want) {
+		t.Errorf("addresses = %v, want %v", meta.NodeAddresses, want)
+	}
+}
+
 // Agent IPs on an interface whose MAC is not a VM NIC are ignored, and
 // nodeNetworkID applies to agent IPs through the NIC's vnet.
 func TestInstanceMetadata_AgentHonoursNodeNetworkID(t *testing.T) {
