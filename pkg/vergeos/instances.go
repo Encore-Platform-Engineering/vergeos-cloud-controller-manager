@@ -267,9 +267,13 @@ func nicLeaseIPs(nics []vergeos.VMNIC) []string {
 	return ips
 }
 
-// guestAgentIPs returns IPv4 addresses qemu-guest-agent reports for interfaces
-// whose MAC matches one of nics (so nodeNetworkID applies), skipping virtual
-// interfaces (docker/CNI/bridges), loopback and link-local. Ordered by NIC.
+// guestAgentIPs returns one IPv4 address per NIC from qemu-guest-agent: the
+// first usable address of the interface whose MAC matches the NIC (so
+// nodeNetworkID applies), skipping virtual interfaces (docker/CNI/bridges),
+// loopback and link-local. Later addresses on the same interface are secondary
+// or floating (keepalived/kube-vip/MetalLB VIPs) and must not become node
+// addresses. Relies on the agent listing the primary address first (`ip addr`
+// order). Ordered by NIC.
 func (i *instances) guestAgentIPs(ctx context.Context, vm *vergeos.VM, nics []vergeos.VMNIC) []string {
 	if i.machineStatus == nil || len(nics) == 0 {
 		return nil
@@ -284,6 +288,7 @@ func (i *instances) guestAgentIPs(ctx context.Context, vm *vergeos.VM, nics []ve
 	}
 	var ips []string
 	for _, nic := range nics {
+	nextNIC:
 		for _, iface := range status.AgentGuestInfo.Network {
 			if isVirtualIface(iface.Name) || !sameMAC(iface.HardwareAddress, nic.MAC) {
 				continue
@@ -294,6 +299,7 @@ func (i *instances) guestAgentIPs(ctx context.Context, vm *vergeos.VM, nics []ve
 				}
 				if _, ok := usableIP(addr.Address); ok {
 					ips = append(ips, addr.Address)
+					break nextNIC
 				}
 			}
 		}
