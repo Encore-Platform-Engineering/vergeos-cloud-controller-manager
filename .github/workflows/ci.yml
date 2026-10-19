@@ -20,7 +20,7 @@ jobs:
     name: Check
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,7 +57,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CHART: charts/vergeos-cloud-controller-manager
       TAG: ${{ github.ref_name }}
@@ -89,7 +89,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PUSH: ${{ startsWith(github.ref, 'refs/tags/v') }}
     steps:
