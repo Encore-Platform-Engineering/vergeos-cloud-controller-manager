@@ -1,6 +1,6 @@
 module github.com/verge-io/vergeos-cloud-controller-manager
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/verge-io/govergeos v0.1.9-0.20260320192948-2978a98c7459
