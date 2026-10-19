@@ -109,6 +109,7 @@ jobs:
           context: .
           platforms: linux/amd64
           push: ${{ env.PUSH == 'true' }}
-          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          # On pull_request ref_name is "<n>/merge", not a valid tag; those builds are never pushed.
+          tags: ${{ env.IMAGE }}:${{ env.PUSH == 'true' && github.ref_name || 'ci' }}
           cache-from: type=gha
           cache-to: type=gha,mode=min
