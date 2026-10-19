@@ -148,6 +148,7 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `loadBalancer.ipPool` | `[]` | Available LB IP addresses |
 | `loadBalancer.sourceNATTarget` | `""` | If set, add an outgoing `translate` (SNAT) rule per Service port with this target (see [Reachability](#reachability)) |
 | `loadBalancer.acceptRules` | `false` | Add an incoming `accept` rule per Service port (see [Reachability](#reachability)) |
+| `loadBalancer.applyStagedChanges` | `false` | Also apply vnet firewall changes the CCM did not make (see Operational notes) |
 | `replicaCount` | `1` | Number of replicas |
 | `nodeSelector` | `{}` | No selector: runs on control-plane or worker-only clusters (e.g. k0smotron) |
 | `tolerations` | control-plane, master, `node.cloudprovider.kubernetes.io/uninitialized`, not-ready, unreachable (all `operator: Exists`); not-ready/unreachable are tolerated for NoSchedule and, for NoExecute, only `tolerationSeconds: 300` so a dead node's CCM is rescheduled | Lets the CCM start on tainted/uninitialized/NotReady nodes |
@@ -231,7 +232,8 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
     "networkID": 1,
     "ipPool": ["10.0.0.100", "10.0.0.101", "10.0.0.102"],
     "sourceNATTarget": "",
-    "acceptRules": false
+    "acceptRules": false,
+    "applyStagedChanges": false
   }
 }
 ```
@@ -270,9 +272,9 @@ The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet ru
 **Migrating from the old prefix scheme** (`k8s-<ns>-<svc>-<proto>-<port>`, empty description). Old names are ambiguous (`a-b/c` and `a/b-c` produce the same names), so a name match proves nothing. A legacy rule is adopted (renamed and stamped in place, no traffic interruption) only if **all** hold: empty description; name equals the legacy name of one of the Service's current ports; destination IP is in the Service's `status.loadBalancer.ingress`; destination port equals that port's `port` and target port equals its `nodePort`. The legacy ipalias is stamped only if an adopted rule points at the same IP. Anything else (e.g. rules for ports since removed) is never modified or deleted and must be cleaned up by hand.
 
 **Operational notes.**
-- Run a single CCM replica (or `--leader-elect=true`). IP allocation is serialised in-process only; during a leader-election overlap two CCMs could pick the same free IP (VergeOS rejecting duplicate ipalias IPs is not verified).
+- **Several CCMs on one vnet.** Run a single CCM replica per cluster (or `--leader-elect=true`). The in-process mutex only serialises one CCM; across CCMs (several clusters on one vnet, or a leader-election overlap) the check "is this IP free" and the alias create are not atomic. VergeOS is not known to reject a second `ipalias` with the same IP (not verified on a live VergeOS from this repo, so the CCM assumes it accepts duplicates). After creating an alias the CCM therefore re-lists the vnet's addresses: if more than one alias holds the IP, the lowest key keeps it, and the other CCM deletes its alias and retries with a different pool IP (or fails, if the IP was requested via `loadBalancerIP`/annotation, or the Service already used it). This resolves simultaneous claims, but a CCM can still briefly see its alias before the loser deletes its own. Overlapping pools across CCMs are therefore safe against duplicate allocation but still contend; give each CCM its own non-overlapping `ipPool` where you can.
 - Changing `--cluster-name` changes the ownership marker: existing LBs look foreign, their IPs count as in use, and the Services get new LBs. Clean up the old rules/aliases by hand.
-- ApplyRules is also issued when the vnet reports `need_fw_apply`, which recovers from a crash between writing rules and applying them (this also applies any other pending firewall change on that vnet).
+- **Applying firewall changes.** VergeOS stages rule edits until someone applies them, and `ApplyRules` activates every staged edit on the vnet. The CCM therefore only calls `ApplyRules` after it changed rules itself (or when its own earlier apply failed; that is remembered in memory and retried). If the vnet reports `need_fw_apply` and the CCM changed nothing, it logs a warning and leaves the staged changes alone, so half-finished UI edits or Terraform-owned rules on a shared vnet are not pushed live by a Service sync. Caveat: when the CCM does apply its own change, VergeOS activates any other staged edits too (there is no per-rule apply). Set `loadBalancer.applyStagedChanges: true` to also apply when only foreign changes are pending; this recovers from a CCM crash between writing and applying rules (the staged rules would otherwise wait for the next CCM change or a manual apply).
 
 Not supported: `allocateLoadBalancerNodePorts: false`, SCTP, IPv6 source ranges, `externalTrafficPolicy: Local`, per-Service vnet/pool (tracked in #7). Services with `spec.loadBalancerClass` are skipped by the cloud-provider service controller.
 

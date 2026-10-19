@@ -57,6 +57,10 @@ loadBalancer:
   # rule per port for vnets whose firewall drops unmatched traffic.
   sourceNATTarget: ""
   acceptRules: false
+  # Apply the vnet's staged firewall changes even when the CCM changed nothing (recovers
+  # from a crash between writing and applying rules, but also activates other people's
+  # pending edits on that vnet). Default: only apply after the CCM's own changes.
+  applyStagedChanges: false
 
 replicaCount: 1
 

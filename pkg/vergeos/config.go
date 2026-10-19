@@ -32,6 +32,12 @@ type lbConfig struct {
 	// AcceptRules adds one incoming `accept` rule per Service port for the
 	// LB IP, for vnets whose firewall drops traffic that no rule accepts.
 	AcceptRules bool `json:"acceptRules"`
+	// ApplyStagedChanges makes the CCM call ApplyRules whenever the vnet
+	// reports need_fw_apply, even if this CCM changed nothing. That recovers
+	// from a crash between writing rules and applying them, but also
+	// activates other people's staged firewall edits on the vnet. Default off:
+	// the CCM only applies after its own rule changes.
+	ApplyStagedChanges bool `json:"applyStagedChanges"`
 }
 
 func parseConfig(r io.Reader) (*cloudConfig, error) {

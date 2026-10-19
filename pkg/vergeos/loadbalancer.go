@@ -296,12 +296,19 @@ func (l *loadBalancer) checkIP(ip string, byIP map[string][]vergeos.VNetAddress,
 //  2. the IP the Service's existing rules already use;
 //  3. an IP in status or an ipalias we own (left over from a failed attempt);
 //  4. the first free pool IP.
-func (l *loadBalancer) chooseIP(ctx context.Context, svc *v1.Service, owner lbOwner, all, owned []vergeos.VNetRule) (string, error) {
+//
+// lost holds IPs this call already lost to another CCM (see ensureAddress);
+// they are skipped, and a requested or already-used IP that was lost is an
+// error because the Service cannot move off it.
+func (l *loadBalancer) chooseIP(ctx context.Context, svc *v1.Service, owner lbOwner, all, owned []vergeos.VNetRule, lost map[string]bool) (string, error) {
 	req, err := requestedIP(svc)
 	if err != nil {
 		return "", err
 	}
 	if existing := vipIP(owned); req == "" && existing != "" {
+		if lost[existing] {
+			return "", fmt.Errorf("%w: %s", errAddressLost, existing)
+		}
 		return existing, nil
 	}
 	if req != "" && !l.inPool(req) {
@@ -312,6 +319,9 @@ func (l *loadBalancer) chooseIP(ctx context.Context, svc *v1.Service, owner lbOw
 		return "", err
 	}
 	if req != "" {
+		if lost[req] {
+			return "", fmt.Errorf("%w: %s", errAddressLost, req)
+		}
 		if l.checkIP(req, byIP, all, owned, owner, svc) == ipBusy {
 			return "", fmt.Errorf("requested load balancer IP %s is already in use", req)
 		}
@@ -322,7 +332,7 @@ func (l *loadBalancer) chooseIP(ctx context.Context, svc *v1.Service, owner lbOw
 	candidates = append(candidates, l.config.IPPool...)
 	firstFree := ""
 	for _, ip := range candidates {
-		if !l.inPool(ip) {
+		if !l.inPool(ip) || lost[ip] {
 			continue
 		}
 		switch l.checkIP(ip, byIP, all, owned, owner, svc) {
@@ -596,9 +606,15 @@ func (d desiredRule) matches(r vergeos.VNetRule) bool {
 		sameIPSet(r.SourceIP, d.sourceIP)
 }
 
-// applyRules activates rule changes. It also applies when an earlier apply
-// failed (in-memory flag) or the vnet itself reports need_fw_apply (covers a
-// CCM crash between writing rules and applying them).
+// applyRules activates rule changes. VergeOS stages every rule edit on a vnet
+// until someone applies them, and ApplyRules activates all of them, so the CCM
+// only applies when it has something of its own to activate: it changed rules
+// (changed) or an earlier apply of its own failed (in-memory flag). Changes it
+// did not make (need_fw_apply with nothing of ours pending) are left staged and
+// logged, unless config.ApplyStagedChanges opts in to applying them, which
+// recovers from a CCM crash between writing rules and applying them.
+// Note that an apply for our own change still activates whatever else is
+// staged on the vnet; VergeOS has no per-rule apply.
 func (l *loadBalancer) applyRules(ctx context.Context, changed bool) error {
 	if !changed && !l.applyPending {
 		net, err := l.network.Get(ctx, l.config.NetworkID)
@@ -608,6 +624,11 @@ func (l *loadBalancer) applyRules(ctx context.Context, changed bool) error {
 		if net == nil || !net.NeedFWApply {
 			return nil
 		}
+		if !l.config.ApplyStagedChanges {
+			klog.Warningf("VNet %d has staged firewall changes (need_fw_apply) that this CCM did not make; not applying them (set loadBalancer.applyStagedChanges=true to apply, or apply them in VergeOS)", l.config.NetworkID)
+			return nil
+		}
+		klog.Infof("VNet %d has staged firewall changes; applying (loadBalancer.applyStagedChanges=true)", l.config.NetworkID)
 	}
 	l.applyPending = true
 	if err := l.network.ApplyRules(ctx, l.config.NetworkID); err != nil {
@@ -644,16 +665,43 @@ func (l *loadBalancer) ensureAddress(ctx context.Context, ip string, owner lbOwn
 	if err != nil && !vergeos.IsNotFoundError(err) {
 		return fmt.Errorf("checking VNet address for %s: %w", ip, err)
 	}
-	if _, err := l.addrs.Create(ctx, &vergeos.VNetAddressCreateRequest{
+	created, err := l.addrs.Create(ctx, &vergeos.VNetAddressCreateRequest{
 		VNet:        l.config.NetworkID,
 		IP:          ip,
 		Type:        vergeos.AddressTypeIPAlias,
 		Hostname:    owner.hostname(),
 		Description: owner.String(),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("creating VNet address for %s: %w", ip, err)
 	}
 	klog.Infof("Created VNet address entry for %s on network %d", ip, l.config.NetworkID)
+	return l.confirmAddress(ctx, ip, created)
+}
+
+// errAddressLost means another CCM claimed the same IP at the same time and
+// won; the caller must pick a different IP.
+var errAddressLost = errors.New("load balancer IP was claimed by another CCM")
+
+// confirmAddress resolves the check-then-create race between CCMs (the
+// in-process mutex cannot cover other processes). VergeOS does not stop two
+// ipaliases with the same IP from being created, so after creating ours we
+// list the vnet's addresses again: if more than one alias holds the IP, the
+// lowest key keeps it. The loser deletes its alias and returns errAddressLost.
+func (l *loadBalancer) confirmAddress(ctx context.Context, ip string, created *vergeos.VNetAddress) error {
+	byIP, err := l.addressesByIP(ctx)
+	if err != nil {
+		return fmt.Errorf("verifying VNet address for %s: %w", ip, err)
+	}
+	for _, a := range byIP[ip] {
+		if a.Key < created.Key {
+			if err := l.addrs.Delete(ctx, int(created.Key)); err != nil && !vergeos.IsNotFoundError(err) {
+				return fmt.Errorf("releasing duplicate VNet address for %s: %w", ip, err)
+			}
+			klog.Warningf("VNet address %s was claimed by another CCM at the same time; released ours", ip)
+			return fmt.Errorf("%w: %s", errAddressLost, ip)
+		}
+	}
 	return nil
 }
 
@@ -847,25 +895,38 @@ func (l *loadBalancer) converge(ctx context.Context, clusterName string, svc *v1
 	if err != nil {
 		return "", err
 	}
-	ip, err := l.chooseIP(ctx, svc, owner, all, owned)
-	if err != nil {
-		return "", err
-	}
-	sources, err := sourceRanges(svc)
-	if err != nil {
-		return "", err
-	}
+	// Another CCM can take the IP we just chose; ensureAddress then releases
+	// ours and we retry with another IP. Every retry excludes one more IP, so
+	// the loop ends.
 	targets, err := l.targets(ctx, nodes)
 	if err != nil {
 		return "", err
 	}
-	desired, err := buildDesired(owner, svc, ip, targets, sources, l.config)
-	if err != nil {
-		return "", err
-	}
-
-	if err := l.ensureAddress(ctx, ip, owner, svc, ipsOf(owned)); err != nil {
-		return "", err
+	var ip string
+	var desired []desiredRule
+	lost := map[string]bool{}
+	for {
+		ip, err = l.chooseIP(ctx, svc, owner, all, owned, lost)
+		if err != nil {
+			return "", err
+		}
+		sources, err := sourceRanges(svc)
+		if err != nil {
+			return "", err
+		}
+		desired, err = buildDesired(owner, svc, ip, targets, sources, l.config)
+		if err != nil {
+			return "", err
+		}
+		err = l.ensureAddress(ctx, ip, owner, svc, ipsOf(owned))
+		if errors.Is(err, errAddressLost) {
+			lost[ip] = true
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		break
 	}
 
 	changed, err := l.reconcileRules(ctx, all, owned, desired)
