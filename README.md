@@ -146,6 +146,7 @@ kubectl -n kube-system delete secret ghcr-credentials  # if no longer needed
 | `loadBalancer.enabled` | `false` | Enable LoadBalancer support; requires `networkID` > 0 and a non-empty `ipPool` (chart fails to render otherwise) |
 | `loadBalancer.networkID` | `0` | VNet network ID |
 | `loadBalancer.ipPool` | `[]` | Available LB IP addresses |
+| `loadBalancer.additionalNetworks` | `[]` | Extra `{networkID, ipPool}` vnets a Service can select with the `loadbalancer.vergeos.io/network-id` annotation (see "Per-Service vnet" below) |
 | `loadBalancer.sourceNATTarget` | `""` | If set, add an outgoing `translate` (SNAT) rule per Service port with this target (see [Reachability](#reachability)) |
 | `loadBalancer.acceptRules` | `false` | Add an incoming `accept` rule per Service port (see [Reachability](#reachability)) |
 | `loadBalancer.applyStagedChanges` | `false` | Also apply vnet firewall changes the CCM did not make (see Operational notes) |
@@ -233,12 +234,15 @@ The CCM reads a JSON cloud config file at `/etc/kubernetes/vergeos-cloud-config.
     "ipPool": ["10.0.0.100", "10.0.0.101", "10.0.0.102"],
     "sourceNATTarget": "",
     "acceptRules": false,
-    "applyStagedChanges": false
+    "applyStagedChanges": false,
+    "additionalNetworks": [
+      {"networkID": 2, "ipPool": ["203.0.113.100", "203.0.113.101"]}
+    ]
   }
 }
 ```
 
-`ipPool` entries must be single IPv4 addresses (no CIDRs or ranges); duplicates and malformed entries make the CCM fail at startup.
+`ipPool` entries (also in `additionalNetworks`) must be single IPv4 addresses (no CIDRs or ranges); duplicates and malformed entries make the CCM fail at startup. Each `additionalNetworks` entry needs a unique `networkID` > 0 (different from `loadBalancer.networkID`) and a non-empty `ipPool`.
 
 ## How It Works
 
@@ -263,6 +267,8 @@ The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet ru
 
 **Targets.** Each translate rule targets one address per node, taken from the node's VM NIC on `loadBalancer.networkID` (DHCP lease first, else the qemu-guest-agent IP of the interface with that NIC's MAC) — not from the node's `InternalIP`, which follows `nodeNetworkID`. So nodes may have their node IP on one vnet and a second NIC on the LB vnet. A node with no NIC address on the LB vnet (or whose VM no longer exists) is skipped and logged; if no node qualifies, Ensure/Update fail with a Service event. A failed API lookup also fails the sync rather than shrinking the target set. The CCM never falls back to an address on another vnet.
 
+**Per-Service vnet.** By default every LB uses `loadBalancer.networkID` and `ipPool`. A Service can select another vnet with the annotation `loadbalancer.vergeos.io/network-id: "<id>"`; the ID must be the default vnet or one of `loadBalancer.additionalNetworks`, whose own `ipPool` is then used (an unknown or non-numeric value makes Ensure/Update fail with a Service event and creates nothing). Only configured vnets can be selected, so Service authors cannot place an LB on an arbitrary vnet. Everything is per vnet: IP allocation and the requested-IP check use that vnet's pool, ownership checks only look at that vnet, and targets are the nodes' NICs on that vnet (see Targets). If the annotation changes, the LB is created on the new vnet and then removed (rules and ipalias stamped with this Service's owner marker) from the others; because of that, each Ensure/Update also lists rules and addresses on every other configured vnet. Delete and GetLoadBalancer look at all configured vnets regardless of the current annotation. To keep a Service off the CCM entirely, set `spec.loadBalancerClass`.
+
 **Requested IP.** Set `spec.loadBalancerIP` or the annotation `loadbalancer.vergeos.io/ip: <ip>` (if both are set they must match). The IP must be in `ipPool` and not used by another rule or vnet address, otherwise Ensure fails. Without a request the Service keeps the IP it already has, else gets the first free pool IP. Pin the IP for anything whose address is baked into other config (e.g. k0smotron API endpoints) — a recreated Service then gets the same IP back.
 
 **Source ranges.** `spec.loadBalancerSourceRanges` (or the legacy annotation `service.beta.kubernetes.io/load-balancer-source-ranges`) is written to every rule's `source_ip` as sorted, comma-separated IPv4 CIDRs; changing or removing it updates the rules. The spec field wins over the annotation. A malformed entry, a list that is set but blank (e.g. annotation `,`), or a list with only IPv6 entries makes Ensure/Update fail with an error (the LB is never silently opened to everyone). In a dual-stack list IPv6 entries are dropped (logged) while at least one IPv4 entry remains. `0.0.0.0/0` means unrestricted. [INFERENCE: not verified on a live VergeOS that a `translate` rule with `source_ip` drops non-matching sources rather than letting them reach the router's own firewall.]
@@ -276,7 +282,7 @@ The CCM implements the Kubernetes `LoadBalancer` interface using VergeOS VNet ru
 - Changing `--cluster-name` changes the ownership marker: existing LBs look foreign, their IPs count as in use, and the Services get new LBs. Clean up the old rules/aliases by hand.
 - **Applying firewall changes.** VergeOS stages rule edits until someone applies them, and `ApplyRules` activates every staged edit on the vnet. The CCM therefore only calls `ApplyRules` after it changed rules itself (or when its own earlier apply failed; that is remembered in memory and retried). If the vnet reports `need_fw_apply` and the CCM changed nothing, it logs a warning and leaves the staged changes alone, so half-finished UI edits or Terraform-owned rules on a shared vnet are not pushed live by a Service sync. Caveat: when the CCM does apply its own change, VergeOS activates any other staged edits too (there is no per-rule apply). Set `loadBalancer.applyStagedChanges: true` to also apply when only foreign changes are pending; this recovers from a CCM crash between writing and applying rules (the staged rules would otherwise wait for the next CCM change or a manual apply).
 
-Not supported: `allocateLoadBalancerNodePorts: false`, SCTP, IPv6 source ranges, `externalTrafficPolicy: Local`, per-Service vnet/pool (tracked in #7). Services with `spec.loadBalancerClass` are skipped by the cloud-provider service controller.
+Not supported: `allocateLoadBalancerNodePorts: false`, SCTP, IPv6 source ranges, `externalTrafficPolicy: Local`. Services with `spec.loadBalancerClass` are skipped by the cloud-provider service controller.
 
 ### Reachability
 

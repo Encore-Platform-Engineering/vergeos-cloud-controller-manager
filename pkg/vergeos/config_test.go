@@ -131,6 +131,32 @@ func TestParseConfig_IPPoolValidation(t *testing.T) {
 	}
 }
 
+func TestParseConfig_AdditionalNetworks(t *testing.T) {
+	cfgWith := func(extra string) string {
+		return `{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":["10.5.0.100"],"additionalNetworks":` + extra + `}}`
+	}
+	cfg, err := parseConfig(strings.NewReader(cfgWith(`[{"networkID":6,"ipPool":["10.6.0.100","10.6.0.101"]}]`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nets := cfg.LoadBalancer.networks()
+	if len(nets) != 2 || nets[0].NetworkID != 5 || nets[1].NetworkID != 6 || len(nets[1].IPPool) != 2 {
+		t.Errorf("networks() = %+v, want default vnet 5 then vnet 6", nets)
+	}
+
+	for name, extra := range map[string]string{
+		"zero id":          `[{"networkID":0,"ipPool":["10.6.0.100"]}]`,
+		"same as default":  `[{"networkID":5,"ipPool":["10.6.0.100"]}]`,
+		"duplicate":        `[{"networkID":6,"ipPool":["10.6.0.100"]},{"networkID":6,"ipPool":["10.6.0.101"]}]`,
+		"empty pool":       `[{"networkID":6,"ipPool":[]}]`,
+		"bad pool address": `[{"networkID":6,"ipPool":["10.6.0.0/24"]}]`,
+	} {
+		if _, err := parseConfig(strings.NewReader(cfgWith(extra))); err == nil {
+			t.Errorf("%s: expected error for additionalNetworks %s", name, extra)
+		}
+	}
+}
+
 func TestParseConfig_SourceNATAndAccept(t *testing.T) {
 	cfg, err := parseConfig(strings.NewReader(`{"loadBalancer":{"enabled":true,"networkID":5,"ipPool":["192.0.2.100"],"sourceNATTarget":"192.0.2.1","acceptRules":true}}`))
 	if err != nil {

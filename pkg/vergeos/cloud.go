@@ -19,7 +19,7 @@ func init() {
 type cloud struct {
 	config    *cloudConfig
 	instances *instances
-	lb        *loadBalancer
+	lb        *lbRouter
 }
 
 func newCloud(config io.Reader) (*cloud, error) {
@@ -38,7 +38,13 @@ func newCloud(config io.Reader) (*cloud, error) {
 		instances: newInstances(client.VMs, client.MachineStatus, client.VMNICs, cfg.NodeNetworkID),
 	}
 	if cfg.LoadBalancer.Enabled {
-		c.lb = newLoadBalancer(client.VNetRules, client.Networks, client.VNetAddresses, c.instances, cfg.LoadBalancer)
+		var workers []*loadBalancer
+		for _, n := range cfg.LoadBalancer.networks() {
+			lc := cfg.LoadBalancer
+			lc.NetworkID, lc.IPPool = n.NetworkID, n.IPPool
+			workers = append(workers, newLoadBalancer(client.VNetRules, client.Networks, client.VNetAddresses, c.instances, lc))
+		}
+		c.lb = newLBRouter(workers...)
 	}
 
 	return c, nil

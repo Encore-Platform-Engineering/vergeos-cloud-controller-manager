@@ -5,6 +5,14 @@
 {{- if not .Values.loadBalancer.ipPool }}
 {{- fail "loadBalancer.ipPool must list at least one IP when loadBalancer.enabled=true" }}
 {{- end }}
+{{- range $i, $n := .Values.loadBalancer.additionalNetworks }}
+{{- if not (gt (int $n.networkID) 0) }}
+{{- fail (printf "loadBalancer.additionalNetworks[%d].networkID must be > 0" $i) }}
+{{- end }}
+{{- if not $n.ipPool }}
+{{- fail (printf "loadBalancer.additionalNetworks[%d].ipPool must list at least one IP" $i) }}
+{{- end }}
+{{- end }}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap
@@ -28,6 +36,7 @@ data:
         "ipPool": {{ .Values.loadBalancer.ipPool | default list | toJson }},
         "sourceNATTarget": {{ .Values.loadBalancer.sourceNATTarget | default "" | toJson }},
         "acceptRules": {{ .Values.loadBalancer.acceptRules | default false }},
-        "applyStagedChanges": {{ .Values.loadBalancer.applyStagedChanges | default false }}
+        "applyStagedChanges": {{ .Values.loadBalancer.applyStagedChanges | default false }},
+        "additionalNetworks": {{ .Values.loadBalancer.additionalNetworks | default list | toJson }}
       }
     }
