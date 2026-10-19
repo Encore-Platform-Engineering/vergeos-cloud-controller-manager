@@ -89,7 +89,7 @@ Each `v*` tag publishes the chart (version = tag without `v`) to `oci://ghcr.io/
 ```bash
 helm registry login ghcr.io -u <GITHUB_USER>
 helm install vergeos-ccm oci://ghcr.io/encore-platform-engineering/charts/vergeos-cloud-controller-manager \
-  --version 0.1.1 --namespace kube-system \
+  --version 0.2.0 --namespace kube-system \
   --set vergeos.host=<VERGEOS_HOST> \
   --set vergeos.apiKey=<API_KEY> \
   --set 'imagePullSecrets[0].name=ghcr-credentials'
